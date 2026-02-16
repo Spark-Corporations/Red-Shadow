@@ -214,12 +214,26 @@ class ClaudeCodeLauncher:
 
             # Start proxy if needed
             env = os.environ.copy()
+
+            # Load saved ngrok URL if not set via environment
+            if "REDCLAW_LLM_URL" not in env:
+                link_file = Path.home() / ".redclaw" / "link.txt"
+                if link_file.exists():
+                    saved_url = link_file.read_text().strip()
+                    if saved_url:
+                        env["REDCLAW_LLM_URL"] = saved_url
+                        logger.info(f"Loaded saved LLM URL: {saved_url}")
+
             if self.enable_proxy and self.check_proxy_needed():
                 if self._start_proxy():
                     env["ANTHROPIC_BASE_URL"] = f"http://127.0.0.1:{self.proxy_port}"
+                    # Set dummy API key so Claude Code skips the login screen
+                    # (the proxy translates requests — no real Anthropic key needed)
+                    env["ANTHROPIC_API_KEY"] = "sk-redclaw-proxy-bypass"
                     print(
                         f"🔄 Reverse proxy active on port {self.proxy_port}\n"
-                        f"   Routing Claude Code → Kaggle Phi-4\n"
+                        f"   Routing Claude Code → {env.get('REDCLAW_LLM_URL', 'backend')}\n"
+                        f"   🔑 Login bypass: dummy API key injected\n"
                     )
                 else:
                     print("⚠️  Proxy failed to start. Claude Code will use Anthropic API directly.")

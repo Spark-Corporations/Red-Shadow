@@ -93,6 +93,7 @@ SLASH_COMMANDS = {
     "/skin": "Launch Claude Code with RedClaw pentesting skin",
     "/doctor": "Health-check all tool dependencies",
     "/setup-tools": "Auto-install missing pentesting tools",
+    "/link": "View/update ngrok LLM backend URL",
     "/clear": "Clear the terminal",
     "/quit": "Exit RedClaw",
 }
@@ -195,6 +196,7 @@ class RedClawCLI:
             "/skin": self._cmd_skin,
             "/doctor": self._cmd_doctor,
             "/setup-tools": self._cmd_setup_tools,
+            "/link": self._cmd_link,
             "/clear": self._cmd_clear,
             "/quit": self._cmd_quit,
         }
@@ -461,7 +463,7 @@ class RedClawCLI:
         try:
             from ..tooling.doctor import DoctorReport
             doctor = DoctorReport()
-            doctor.run(console=self._console)
+            doctor.run()
         except ImportError:
             self._console.print("[error]Tooling module not available.[/]")
         except Exception as e:
@@ -484,6 +486,43 @@ class RedClawCLI:
             self._console.print("[error]Tooling module not available.[/]")
         except Exception as e:
             self._console.print(f"[error]Setup failed: {e}[/]")
+
+    def _cmd_link(self, args: list[str]) -> None:
+        """View or update the ngrok LLM backend URL (REDCLAW_LLM_URL)."""
+        link_file = Path.home() / ".redclaw" / "link.txt"
+
+        if not args:
+            # Show current URL
+            current = os.environ.get("REDCLAW_LLM_URL", None)
+            saved = None
+            if link_file.exists():
+                saved = link_file.read_text().strip()
+
+            self._console.print(Panel(
+                f"[info]Active URL[/]:  {current or '[dim]not set[/]'}\n"
+                f"[info]Saved URL[/]:   {saved or '[dim]none[/]'}\n\n"
+                "[dim]Usage: /link <ngrok_url>[/]",
+                title="[bold]LLM Backend Link[/]",
+                border_style="red",
+            ))
+            return
+
+        new_url = args[0].strip()
+        if not new_url.startswith("http"):
+            new_url = f"https://{new_url}"
+
+        # Update env at runtime
+        os.environ["REDCLAW_LLM_URL"] = new_url
+
+        # Persist for next session
+        link_file.parent.mkdir(parents=True, exist_ok=True)
+        link_file.write_text(new_url)
+
+        self._console.print(
+            f"[success]✅ LLM backend URL updated:[/]\n"
+            f"   [info]{new_url}[/]\n"
+            f"   [dim]Saved to {link_file}[/]"
+        )
 
     def _cmd_clear(self, args: list[str]) -> None:
         self._console.clear()

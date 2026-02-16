@@ -96,6 +96,11 @@ class StateManager:
         state.checkpoint()  # saves to disk
     """
 
+    @property
+    def state(self) -> "PipelineState":
+        """Public accessor for the pipeline state."""
+        return self._state
+
     def __init__(self, output_dir: str | Path = "./output", engagement_name: str = ""):
         self._output_dir = Path(output_dir)
         self._output_dir.mkdir(parents=True, exist_ok=True)
