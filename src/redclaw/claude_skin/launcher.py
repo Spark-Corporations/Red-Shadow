@@ -139,6 +139,57 @@ class ClaudeCodeLauncher:
         logger.info(f"MCP config: {mcp_file}")
         return mcp_file
 
+    # ── Claude Code Login Bypass ──────────────────────────────────────
+
+    def _bypass_claude_onboarding(self) -> None:
+        """
+        Set hasCompletedOnboarding in ~/.claude.json to skip the
+        first-run login/onboarding wizard.
+        """
+        claude_json = Path.home() / ".claude.json"
+        try:
+            config = {}
+            if claude_json.exists():
+                config = json.loads(claude_json.read_text(encoding="utf-8"))
+            config["hasCompletedOnboarding"] = True
+            claude_json.write_text(
+                json.dumps(config, indent=2), encoding="utf-8"
+            )
+            logger.info("Set hasCompletedOnboarding=true in ~/.claude.json")
+        except Exception as e:
+            logger.warning(f"Could not update ~/.claude.json: {e}")
+
+    def _setup_api_key_helper(self, api_key: str) -> None:
+        """
+        Create an apiKeyHelper script and configure ~/.claude/settings.json
+        so Claude Code auto-loads the dummy API key without prompting.
+        """
+        claude_dir = Path.home() / ".claude"
+        claude_dir.mkdir(exist_ok=True)
+
+        # Create the helper script that simply outputs the key
+        if sys.platform == "win32":
+            helper_script = claude_dir / "redclaw_key_helper.bat"
+            helper_script.write_text(f"@echo {api_key}\n", encoding="utf-8")
+        else:
+            helper_script = claude_dir / "redclaw_key_helper.sh"
+            helper_script.write_text(f"#!/bin/sh\necho '{api_key}'\n", encoding="utf-8")
+            helper_script.chmod(0o755)
+
+        # Update settings.json with apiKeyHelper
+        settings_file = claude_dir / "settings.json"
+        try:
+            settings = {}
+            if settings_file.exists():
+                settings = json.loads(settings_file.read_text(encoding="utf-8"))
+            settings["apiKeyHelper"] = str(helper_script)
+            settings_file.write_text(
+                json.dumps(settings, indent=2), encoding="utf-8"
+            )
+            logger.info(f"Set apiKeyHelper in {settings_file}")
+        except Exception as e:
+            logger.warning(f"Could not update settings.json: {e}")
+
     # ── Proxy ─────────────────────────────────────────────────────────────
 
     def _start_proxy(self) -> bool:
@@ -227,13 +278,30 @@ class ClaudeCodeLauncher:
             if self.enable_proxy and self.check_proxy_needed():
                 if self._start_proxy():
                     env["ANTHROPIC_BASE_URL"] = f"http://127.0.0.1:{self.proxy_port}"
-                    # Set dummy API key so Claude Code skips the login screen
-                    # (the proxy translates requests — no real Anthropic key needed)
-                    env["ANTHROPIC_API_KEY"] = "sk-redclaw-proxy-bypass"
+
+                    # ── Claude Code Login Bypass ──────────────────────────
+                    # Claude Code validates the API key format before making
+                    # any requests. The key must start with "sk-ant-api03-"
+                    # to pass the format check.
+                    dummy_key = (
+                        "sk-ant-api03-redclaw-proxy-bypass-"
+                        "000000000000000000000000000000000000000000000000-"
+                        "00000000000000000000000000AA"
+                    )
+                    env["ANTHROPIC_API_KEY"] = dummy_key
+
+                    # Set hasCompletedOnboarding so Claude Code skips the
+                    # first-run login/onboarding wizard entirely.
+                    self._bypass_claude_onboarding()
+
+                    # Set up apiKeyHelper so Claude Code uses our dummy key
+                    # even if it ignores the env var in some versions.
+                    self._setup_api_key_helper(dummy_key)
+
                     print(
                         f"🔄 Reverse proxy active on port {self.proxy_port}\n"
                         f"   Routing Claude Code → {env.get('REDCLAW_LLM_URL', 'backend')}\n"
-                        f"   🔑 Login bypass: dummy API key injected\n"
+                        f"   🔑 Login bypass: API key + onboarding skip configured\n"
                     )
                 else:
                     print("⚠️  Proxy failed to start. Claude Code will use Anthropic API directly.")

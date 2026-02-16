@@ -425,7 +425,43 @@ class ProxyServer:
         return response
 
     async def _handle_passthrough(self, request: web.Request) -> web.Response:
-        """Pass through any unhandled requests."""
+        """
+        Handle any requests not matched by explicit routes.
+        Returns success responses for auth/validation endpoints so
+        Claude Code's API key check passes through the proxy.
+        """
+        path = request.path.lower()
+        logger.info(f"Passthrough: {request.method} {request.path}")
+
+        # Auth/validation endpoints — return success so Claude Code
+        # accepts the dummy API key and skips login
+        if "auth" in path or "oauth" in path or "token" in path or "login" in path:
+            return web.json_response({
+                "status": "ok",
+                "authenticated": True,
+                "type": "api_key",
+            })
+
+        # Account/org info — Claude Code may check this
+        if "account" in path or "organization" in path or "org" in path:
+            return web.json_response({
+                "id": "org_redclaw",
+                "name": "RedClaw Proxy",
+                "type": "organization",
+            })
+
+        # API key validation — some Claude Code versions POST here
+        if "api_key" in path or "apikey" in path or "keys" in path:
+            return web.json_response({
+                "valid": True,
+                "type": "api_key",
+                "id": "sk-redclaw",
+            })
+
+        # Beta/versioned endpoints — return empty success
+        if path.startswith("/v1/") or path.startswith("/beta/"):
+            return web.json_response({"type": "ok", "data": []})
+
         return web.json_response(
             {"error": {"type": "not_found", "message": f"Unknown endpoint: {request.path}"}},
             status=404,
