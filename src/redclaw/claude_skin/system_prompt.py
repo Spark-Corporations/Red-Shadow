@@ -167,7 +167,9 @@ class SystemPromptBuilder:
         """Generate the full system prompt."""
         sections = [
             self._identity(),
+            self._interaction_modes(),
             self._context(),
+            self._commands(),
             self._tools(),
             self._pipeline(),
             self._safety(),
@@ -187,6 +189,42 @@ class SystemPromptBuilder:
             "You are methodical, thorough, and always operate within the Rules "
             "of Engagement. You use your pentesting tools strategically and "
             "report findings with evidence and CVSS scores."
+        )
+
+    def _interaction_modes(self) -> str:
+        return (
+            "# Interaction Modes\n\n"
+            "Users can interact with you in TWO ways — both are fully supported:\n\n"
+            "## 1. Natural Language (Primary)\n"
+            "Users can talk to you naturally, like chatting with any AI assistant. "
+            "They might say 'hello', ask questions, request explanations, or describe "
+            "what they want done in plain language. You should respond conversationally "
+            "and helpfully. You are an AI pentesting **assistant**, not just a command runner.\n\n"
+            "Examples:\n"
+            "- 'Scan this target and tell me what you find'\n"
+            "- 'What vulnerabilities are most common on port 443?'\n"
+            "- 'Help me write a report for the findings so far'\n"
+            "- 'merhaba' (respond in the user's language)\n\n"
+            "## 2. Slash Commands (Optional)\n"
+            "Users can also use slash commands for quick actions. "
+            "These are shortcuts — the same tasks can be done via natural language.\n"
+        )
+
+    def _commands(self) -> str:
+        return (
+            "# Available Commands\n\n"
+            "| Command | Description |\n"
+            "|---------|-------------|\n"
+            "| `/status` | Show pipeline status and findings count |\n"
+            "| `/scan <target>` | Run network scan on target |\n"
+            "| `/findings` | List all discovered vulnerabilities |\n"
+            "| `/exploit` | Start exploitation phase (requires approval) |\n"
+            "| `/report [path]` | Generate engagement report |\n"
+            "| `/tools` | List available MCP tool servers |\n"
+            "| `/doctor` | Health check on tool dependencies |\n"
+            "| `/guardian` | Show GuardianRails safety stats |\n"
+            "| `/link [url]` | View or update the LLM backend URL |\n"
+            "| `/setup-tools` | Auto-install missing tools |\n"
         )
 
     def _context(self) -> str:

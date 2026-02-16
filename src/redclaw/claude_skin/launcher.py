@@ -139,6 +139,35 @@ class ClaudeCodeLauncher:
         logger.info(f"MCP config: {mcp_file}")
         return mcp_file
 
+    def _install_custom_commands(self) -> None:
+        """
+        Copy RedClaw custom slash commands into .claude/commands/
+        so they are available as /command-name in Claude Code.
+        """
+        # Source: .claude/commands/ in the project root
+        project_root = Path(__file__).resolve().parent.parent.parent.parent
+        source_dir = project_root / ".claude" / "commands"
+
+        if not source_dir.exists():
+            logger.warning(f"Custom commands directory not found: {source_dir}")
+            return
+
+        # Destination: .claude/commands/ in the current working directory
+        # Claude Code looks for commands in CWD/.claude/commands/
+        dest_dir = Path.cwd() / ".claude" / "commands"
+        dest_dir.mkdir(parents=True, exist_ok=True)
+
+        copied = 0
+        for cmd_file in source_dir.glob("*.md"):
+            dest_file = dest_dir / cmd_file.name
+            shutil.copy2(cmd_file, dest_file)
+            copied += 1
+            logger.debug(f"Installed command: /{cmd_file.stem}")
+
+        if copied:
+            print(f"📋 Installed {copied} custom commands (type / to see them)")
+            logger.info(f"Installed {copied} custom commands to {dest_dir}")
+
     # ── Claude Code Login Bypass ──────────────────────────────────────
 
     def _bypass_claude_onboarding(self) -> None:
@@ -262,6 +291,9 @@ class ClaudeCodeLauncher:
             system_prompt = self._generate_system_prompt()
             hooks_file = self._generate_hooks_config()
             mcp_file = self._generate_mcp_config()
+
+            # Install custom slash commands for Claude Code
+            self._install_custom_commands()
 
             # Start proxy if needed
             env = os.environ.copy()

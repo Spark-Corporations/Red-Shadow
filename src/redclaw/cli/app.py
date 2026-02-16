@@ -224,9 +224,10 @@ class RedClawCLI:
         # Pipeline status
         if self._state:
             state = self._state.state
+            phase_status = self._state.get_phase_status(self._state.current_phase)
             panel_content.append(f"[phase]Phase[/]: {state.current_phase}")
-            panel_content.append(f"[info]Status[/]: {state.status}")
-            panel_content.append(f"[info]Findings[/]: {len(state.findings)}")
+            panel_content.append(f"[info]Status[/]: {phase_status}")
+            panel_content.append(f"[info]Findings[/]: {len(state.global_findings)}")
         else:
             panel_content.append("[dim]No active engagement[/]")
 
@@ -250,7 +251,8 @@ class RedClawCLI:
             cfg = self._config._config
             table.add_row("Name", cfg.name)
             table.add_row("Targets", ", ".join(cfg.targets.include))
-            table.add_row("Phases", ", ".join(cfg.phases.enabled))
+            enabled_phases = [p for p, pc in cfg.phases.items() if pc.enabled]
+            table.add_row("Phases", ", ".join(enabled_phases) if enabled_phases else "none")
             table.add_row("LLM Model", cfg.llm.model)
             table.add_row("LLM Provider", cfg.llm.provider)
             self._console.print(table)
@@ -300,7 +302,7 @@ class RedClawCLI:
             self._console.print("[dim]No findings yet.[/]")
             return
 
-        findings = self._state.state.findings
+        findings = self._state.state.global_findings
         if not findings:
             self._console.print("[dim]No findings recorded.[/]")
             return
@@ -556,7 +558,7 @@ class RedClawCLI:
             state = self._state.state
             context["findings"] = [
                 {"title": f.title, "severity": f.severity}
-                for f in state.findings
+                for f in state.global_findings
             ]
         if self._config:
             try:
