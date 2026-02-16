@@ -1,0 +1,14 @@
+# RedClaw v2.0 — Python Dependencies
+# Install: pip install -r requirements.txt
+# Or just: pip install -e .  (reads from pyproject.toml)
+
+paramiko>=3.4.0
+rich>=13.7.0
+prompt-toolkit>=3.0.43
+pyyaml>=6.0.1
+jinja2>=3.1.3
+requests>=2.31.0
+msgpack>=1.0.7
+psutil>=5.9.8
+aiohttp>=3.9.3
+pydantic>=2.6.0
