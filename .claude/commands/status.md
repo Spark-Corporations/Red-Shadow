@@ -1,12 +1,11 @@
-Show the current status of the RedClaw pentesting engagement.
+Show the full system status of the RedClaw pentesting engagement.
 
-Use the Bash tool to run: `python -m redclaw.claude_skin.hook_handler health_check`
+Use the Bash tool to run: `python -m redclaw.claude_skin.hook_handler status`
 
-Then provide a summary including:
-- Current pipeline phase
-- Number of findings discovered so far
-- Active sessions (SSH, Meterpreter)
-- LLM provider status
-- Tool availability
+This performs REAL checks:
+- **LLM Backend**: Tests actual HTTP connectivity to the configured endpoint
+- **Tool Health**: Checks which pentesting tools (nmap, masscan, nuclei, etc.) are installed
+- **Engagement State**: Reads pipeline state and findings from disk
+- **GuardianRails**: Shows audit log statistics
 
-Format the output clearly with emoji indicators (🟢 ready, 🔴 not available).
+Format the output clearly with emoji indicators (🟢 reachable, 🟡 unreachable, 🔴 not configured).

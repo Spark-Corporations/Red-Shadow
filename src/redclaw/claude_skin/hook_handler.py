@@ -5,22 +5,28 @@ Called by Claude Code hooks as subprocess commands:
   python -m redclaw.claude_skin.hook_handler <action> [args...]
 
 Actions:
-  session_start  — Display RedClaw banner
-  health_check   — Quick tool health check
-  pre_tool_use   — GuardianRails validation
-  post_tool_use  — Log tool result to state
-  log_tool_call  — Audit log for tool invocation
+  session_start    — Display RedClaw banner
+  health_check     — Quick tool health check
+  status           — Full system status with REAL LLM connectivity
+  link [url]       — View/update LLM backend URL + verify connectivity
+  findings         — List vulnerability findings from state
+  pre_tool_use     — GuardianRails validation
+  post_tool_use    — Log tool result to state
+  log_tool_call    — Audit log for tool invocation
   extract_findings — Parse output for vulnerability findings
-  checkpoint     — Save current state
-  session_end    — Generate session summary
+  checkpoint       — Save current state
+  session_end      — Generate session summary
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import os
 import sys
 import time
+import urllib.request
+import urllib.error
 from pathlib import Path
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -58,14 +64,14 @@ def handle_health_check() -> None:
         from redclaw.tooling.registry import TOOL_REGISTRY
 
         detector = ToolDetector()
-        results = detector.detect_all(TOOL_REGISTRY)
+        results = detector.check_all()
         total = len(results)
         installed = sum(1 for r in results if r.installed)
         print(f"🩺 Tool Health: {installed}/{total} tools available")
         for r in results:
             icon = "✅" if r.installed else "❌"
             ver = r.version if r.version else "—"
-            print(f"   {icon} {r.name:<15} {ver}")
+            print(f"   {icon} {r.tool.name:<15} {ver}")
     except Exception as e:
         print(f"⚠️  Health check unavailable: {e}")
 
@@ -169,11 +175,184 @@ def handle_session_end() -> None:
     print("═" * 50)
 
 
+# ── REAL Command Handlers ───────────────────────────────────────────────────────
+
+def _test_url_reachable(url: str, timeout: int = 5) -> bool:
+    """Actually test if a URL is reachable via HTTP. No faking."""
+    try:
+        # Ensure URL has /v1 for the LLM endpoint check
+        test_url = url.rstrip("/")
+        if not test_url.endswith("/v1"):
+            test_url += "/v1"
+        test_url += "/models"
+
+        req = urllib.request.Request(test_url, method="GET")
+        req.add_header("User-Agent", "RedClaw/2.0 HealthCheck")
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.status == 200
+    except (urllib.error.URLError, urllib.error.HTTPError, OSError, ValueError):
+        # Also try the base URL
+        try:
+            req = urllib.request.Request(url.rstrip("/"), method="GET")
+            req.add_header("User-Agent", "RedClaw/2.0 HealthCheck")
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return 200 <= resp.status < 500
+        except Exception:
+            return False
+
+
+def handle_link(url: str = "") -> None:
+    """View or update LLM backend URL — REAL: saves to disk + tests connectivity."""
+    link_file = Path.home() / ".redclaw" / "link.txt"
+
+    if not url or not url.strip():
+        # Show current URL
+        env_url = os.environ.get("REDCLAW_LLM_URL", None)
+        saved_url = None
+        if link_file.exists():
+            saved_url = link_file.read_text().strip()
+
+        active = env_url or saved_url
+        print("🔗 LLM Backend Link")
+        print(f"   Active URL:  {active or 'not set'}")
+        print(f"   Saved URL:   {saved_url or 'none'}")
+        print(f"   Env URL:     {env_url or 'not set'}")
+
+        if active:
+            print(f"\n   Testing connectivity to {active}...")
+            reachable = _test_url_reachable(active)
+            if reachable:
+                print("   ✅ 🟢 LLM endpoint is REACHABLE")
+            else:
+                print("   ❌ 🟡 LLM endpoint is UNREACHABLE")
+                print("   → Check if Kaggle notebook is running and ngrok tunnel is active")
+        else:
+            print("\n   ⚠️  No URL configured. Use: /link <ngrok_url>")
+        return
+
+    # Update URL
+    new_url = url.strip()
+    if not new_url.startswith("http"):
+        new_url = f"https://{new_url}"
+
+    # Save to disk
+    link_file.parent.mkdir(parents=True, exist_ok=True)
+    link_file.write_text(new_url)
+
+    # Update env
+    os.environ["REDCLAW_LLM_URL"] = new_url
+
+    print(f"🔗 LLM backend URL updated: {new_url}")
+    print(f"   Saved to: {link_file}")
+
+    # REAL connectivity test
+    print(f"   Testing connectivity...")
+    reachable = _test_url_reachable(new_url)
+    if reachable:
+        print("   ✅ 🟢 LLM endpoint is REACHABLE")
+    else:
+        print("   ⚠️  🟡 LLM endpoint is UNREACHABLE")
+        print("   → URL saved, but the endpoint is not responding.")
+        print("   → Check if Kaggle notebook is running and ngrok tunnel is active.")
+
+
+def handle_status() -> None:
+    """Show REAL system status — tests actual LLM connectivity, not fake."""
+    print("🔴 RedClaw v2.0 System Status")
+    print(f"   Time: {time.strftime('%Y-%m-%d %H:%M:%S')}")
+    print()
+
+    # 1. LLM Backend — test REAL connectivity
+    link_file = Path.home() / ".redclaw" / "link.txt"
+    llm_url = os.environ.get("REDCLAW_LLM_URL")
+    if not llm_url and link_file.exists():
+        llm_url = link_file.read_text().strip()
+
+    print("── LLM Backend ────────────────────────────────────")
+    if llm_url:
+        print(f"   Endpoint: {llm_url}")
+        reachable = _test_url_reachable(llm_url)
+        if reachable:
+            print("   Status:   🟢 REACHABLE")
+        else:
+            print("   Status:   🟡 UNREACHABLE")
+    else:
+        print("   Endpoint: NOT CONFIGURED")
+        print("   Status:   🔴 No URL set — use /link <ngrok_url>")
+
+    # 2. Tool health — delegate to real health_check
+    print()
+    print("── Tool Health ────────────────────────────────────")
+    handle_health_check()
+
+    # 3. State — show real engagement info
+    print()
+    print("── Engagement State ──────────────────────────────")
+    state_file = Path.home() / ".redclaw" / "state" / "pipeline_state.json"
+    if state_file.exists():
+        try:
+            state_data = json.loads(state_file.read_text())
+            phase = state_data.get("current_phase", "unknown")
+            findings = state_data.get("global_findings", [])
+            print(f"   Phase:    {phase}")
+            print(f"   Findings: {len(findings)}")
+        except Exception as e:
+            print(f"   ⚠️  Could not read state: {e}")
+    else:
+        print("   No active engagement")
+
+    # 4. GuardianRails
+    print()
+    print("── GuardianRails ─────────────────────────────────")
+    audit_file = Path.home() / ".redclaw" / "logs" / "tool_audit.jsonl"
+    if audit_file.exists():
+        try:
+            lines = audit_file.read_text().strip().split("\n")
+            print(f"   Commands audited: {len(lines)}")
+        except Exception:
+            print("   ⚠️  Could not read audit log")
+    else:
+        print("   Active (no commands processed yet)")
+
+
+def handle_findings_list() -> None:
+    """List findings from REAL state file on disk."""
+    state_file = Path.home() / ".redclaw" / "state" / "pipeline_state.json"
+
+    if not state_file.exists():
+        print("No active engagement state found.")
+        print("Start a scan first, or load an engagement config.")
+        return
+
+    try:
+        state_data = json.loads(state_file.read_text())
+    except Exception as e:
+        print(f"⚠️  Could not read state file: {e}")
+        return
+
+    findings = state_data.get("global_findings", [])
+    if not findings:
+        print("No findings recorded yet.")
+        return
+
+    print(f"🔍 Total findings: {len(findings)}")
+    print()
+    for i, f in enumerate(findings, 1):
+        sev = f.get("severity", "info").upper()
+        title = f.get("title", "Untitled")
+        target = f.get("target", "N/A")
+        phase = f.get("phase", "?")
+        print(f"  {i}. [{sev}] {title} — {target} (phase: {phase})")
+
+
 # ── CLI Entry Point ───────────────────────────────────────────────────────────
 
 ACTIONS = {
     "session_start": (handle_session_start, 0),
     "health_check": (handle_health_check, 0),
+    "status": (handle_status, 0),
+    "link": (handle_link, 1),
+    "findings": (handle_findings_list, 0),
     "pre_tool_use": (handle_pre_tool_use, 2),
     "post_tool_use": (handle_post_tool_use, 2),
     "log_tool_call": (handle_log_tool_call, 2),

@@ -141,14 +141,15 @@ class Phi4Provider:
                     return response
                 except Exception as e:
                     last_error = e
+                    err_msg = str(e)[:200]
                     logger.warning(
                         f"Provider {provider.name} attempt {attempt}/{provider.retry_count} "
-                        f"failed: {e}"
+                        f"failed: {err_msg}"
                     )
                     if attempt < provider.retry_count:
                         await self._async_sleep(2 ** attempt)  # exponential backoff
 
-            logger.error(f"Provider {provider.name} exhausted all retries")
+            logger.debug(f"Provider {provider.name} exhausted all retries")
 
         raise RuntimeError(
             f"All LLM providers failed. Last error: {last_error}"
@@ -201,8 +202,9 @@ class Phi4Provider:
                             except json.JSONDecodeError:
                                 continue
         except Exception as e:
-            logger.error(f"Streaming error: {e}")
-            yield f"\n[Streaming error: {e}]"
+            err_msg = str(e)[:200]
+            logger.error(f"Streaming error: {err_msg}")
+            yield f"\n[Streaming error: {err_msg}]"
 
     async def _call_provider(
         self,
@@ -238,7 +240,7 @@ class Phi4Provider:
             ) as resp:
                 if resp.status != 200:
                     text = await resp.text()
-                    raise RuntimeError(f"HTTP {resp.status}: {text[:500]}")
+                    raise RuntimeError(f"HTTP {resp.status}: {text[:200]}")
 
                 data = await resp.json()
 

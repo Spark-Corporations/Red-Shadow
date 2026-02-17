@@ -155,6 +155,15 @@ class ClaudeCodeLauncher:
         # Destination: .claude/commands/ in the current working directory
         # Claude Code looks for commands in CWD/.claude/commands/
         dest_dir = Path.cwd() / ".claude" / "commands"
+
+        # Guard: if CWD is the project root, source == dest → skip copy
+        if source_dir.resolve() == dest_dir.resolve():
+            logger.debug("CWD is project root — commands already in place, skipping copy")
+            count = len(list(source_dir.glob("*.md")))
+            if count:
+                print(f"📋 {count} custom commands ready (type / to see them)")
+            return
+
         dest_dir.mkdir(parents=True, exist_ok=True)
 
         copied = 0

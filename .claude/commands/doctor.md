@@ -1,13 +1,12 @@
-Run a health check on all RedClaw tool dependencies and system status.
+Run a comprehensive health check on all RedClaw dependencies and system status.
 
-Use the Bash tool to run: `python -m redclaw.claude_skin.hook_handler health_check`
+Use the Bash tool to run: `python -m redclaw.claude_skin.hook_handler status`
 
-Then provide additional checks:
-1. **Tool Dependencies** — Check if nmap, masscan, nuclei, metasploit, sqlmap, hydra, linpeas, winpeas, bloodhound are installed
-2. **Python Packages** — Verify required packages are available
-3. **LLM Provider** — Test endpoint connectivity
-4. **Disk Space** — Check available storage
+This performs the full system check including:
+1. **LLM Provider** — Tests actual HTTP connectivity to the ngrok/Kaggle endpoint
+2. **Tool Dependencies** — Checks if nmap, masscan, nuclei, metasploit, sqlmap, hydra, linpeas, winpeas, bloodhound are installed
+3. **Engagement State** — Shows current phase and findings count
+4. **GuardianRails** — Shows audit log statistics
 
 For any missing tools, suggest running `/setup-tools` to auto-install them.
-
 Format output as a clean table with ✅/❌ indicators.

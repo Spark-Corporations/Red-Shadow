@@ -90,6 +90,8 @@ class OpenClawRuntime:
         self._provider: Optional[Phi4Provider] = None
         self._tool_bridge: Optional[ToolBridge] = None
         self._initialized = False
+        self._health_status = "not_initialized"  # REAL: "ready" | "degraded" | "not_initialized"
+        self._health_providers: dict[str, Any] = {}  # REAL health check results per provider
         self._iteration_count = 0
         self._total_tasks = 0
         self._conversation: list[dict[str, Any]] = []
@@ -132,23 +134,27 @@ class OpenClawRuntime:
             timeout=self._config.timeout,
         )
 
-        # Health check
+        # Health check — this is the REAL connectivity test
         health = self._provider.health_check()
         any_reachable = any(
             v.get("reachable", False) for v in health.values()
         )
 
-        if not any_reachable:
+        # Store REAL health status — no faking
+        self._health_providers = health
+        if any_reachable:
+            self._health_status = "ready"
+            logger.info(f"LLM provider ready: {health}")
+        else:
+            self._health_status = "degraded"
             logger.warning(
                 f"No LLM providers reachable! Health: {health}. "
                 "Agent will fail on first task."
             )
-        else:
-            logger.info(f"LLM provider ready: {health}")
 
         self._initialized = True
         return {
-            "status": "ready" if any_reachable else "degraded",
+            "status": self._health_status,
             "providers": health,
             "model": self._config.llm_model,
             "max_iterations": self._config.max_iterations,
@@ -242,11 +248,12 @@ class OpenClawRuntime:
                 )
             except Exception as e:
                 logger.error(f"LLM call failed: {e}")
+                # Show clean error to user (raw exception may contain HTML pages)
                 yield AgentMessage(
                     role="system",
-                    content=f"❌ LLM error: {e}",
+                    content="❌ LLM error: All LLM providers failed — check /link and /agent",
                     is_final=True,
-                    metadata={"error": str(e)},
+                    metadata={"error": str(e)[:200]},
                 )
                 return
 
@@ -453,15 +460,19 @@ class OpenClawRuntime:
     # ── Lifecycle ─────────────────────────────────────────────────────────
 
     def shutdown(self) -> None:
-        """Shutdown the runtime."""
+        """Shutdown the runtime — resets all state including health."""
         self._initialized = False
+        self._health_status = "not_initialized"
+        self._health_providers = {}
         self._conversation = []
         logger.info("OpenClaw runtime shutdown")
 
     def get_status(self) -> dict[str, Any]:
-        """Get runtime status."""
+        """Get runtime status — returns REAL health, not fake."""
         return {
             "initialized": self._initialized,
+            "health": self._health_status,  # REAL: "ready" | "degraded" | "not_initialized"
+            "health_providers": self._health_providers,  # Per-provider reachability
             "llm_endpoint": self._config.llm_endpoint,
             "llm_model": self._config.llm_model,
             "total_tasks": self._total_tasks,

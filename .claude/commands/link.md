@@ -1,22 +1,10 @@
-View or update the ngrok LLM backend URL used by RedClaw's reverse proxy.
+View or update the ngrok LLM backend URL used by RedClaw.
 
-## Without arguments
-Show the current REDCLAW_LLM_URL from the environment and the saved URL from `~/.redclaw/link.txt`.
+Use the Bash tool to run: `python -m redclaw.claude_skin.hook_handler link $ARGUMENTS`
 
-Use the Bash tool to run:
-```bash
-echo "Active URL: ${REDCLAW_LLM_URL:-not set}"
-if [ -f ~/.redclaw/link.txt ]; then echo "Saved URL: $(cat ~/.redclaw/link.txt)"; else echo "Saved URL: none"; fi
-```
+This will:
+- Without arguments: Show current active/saved/env URLs and **test real connectivity**
+- With a URL argument: Save the new URL to `~/.redclaw/link.txt`, update the environment, and test connectivity
 
-## With a URL argument: /link $ARGUMENTS
-Update the LLM backend URL. Use the Bash tool to run:
-```bash
-mkdir -p ~/.redclaw
-echo "$ARGUMENTS" > ~/.redclaw/link.txt
-export REDCLAW_LLM_URL="$ARGUMENTS"
-echo "✅ LLM backend URL updated to: $ARGUMENTS"
-echo "   Saved to ~/.redclaw/link.txt"
-```
-
-Tell the user the URL has been updated and will take effect on next proxy restart.
+The handler performs an actual HTTP request to verify the LLM endpoint is reachable.
+Report the results to the user clearly.

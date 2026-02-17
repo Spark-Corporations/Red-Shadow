@@ -231,11 +231,30 @@ class RedClawCLI:
         else:
             panel_content.append("[dim]No active engagement[/]")
 
-        # Runtime status
+        # Runtime status — REAL health, not fake
         if self._runtime:
             status = self._runtime.get_status()
-            panel_content.append(f"\n[agent]OpenClaw[/]: {'🟢 Ready' if status['initialized'] else '🔴 Not initialized'}")
+            health = status.get('health', 'not_initialized')
+
+            if health == 'ready':
+                panel_content.append(f"\n[agent]OpenClaw[/]: 🟢 Ready (LLM reachable)")
+            elif health == 'degraded':
+                panel_content.append(f"\n[agent]OpenClaw[/]: 🟡 Degraded (LLM unreachable)")
+            else:
+                panel_content.append(f"\n[agent]OpenClaw[/]: 🔴 Not initialized")
+
             panel_content.append(f"[tool]LLM[/]: {status.get('llm_model', 'N/A')}")
+            panel_content.append(f"[tool]Endpoint[/]: {status.get('llm_endpoint', 'N/A')}")
+
+            # Per-provider health
+            providers = status.get('health_providers', {})
+            if providers:
+                for name, info in providers.items():
+                    reachable = info.get('reachable', False)
+                    icon = '✅' if reachable else '❌'
+                    panel_content.append(f"  {icon} {name}: {'reachable' if reachable else 'unreachable'}")
+
+            panel_content.append(f"[tool]Tools[/]: {status.get('tool_bridge', 'none')}")
 
         self._console.print(Panel(
             "\n".join(panel_content),
@@ -260,20 +279,31 @@ class RedClawCLI:
             self._console.print("[warning]No configuration loaded. Provide an engagement YAML.[/]")
 
     def _cmd_scan(self, args: list[str]) -> None:
-        target = args[0] if args else "configured targets"
-        self._console.print(f"[tool]Starting scan[/] on {target}...")
-        with Progress(
-            SpinnerColumn(), TextColumn("[progress.description]{task.description}"),
-            BarColumn(), console=self._console,
-        ) as progress:
-            task = progress.add_task("Scanning...", total=100)
-            # In real use, this would delegate to the orchestrator
-            for i in range(100):
-                progress.update(task, advance=1, description=f"Scanning port {i*650}...")
-                time.sleep(0.02)
-        self._console.print("[success]Scan phase complete.[/]")
+        """Start a REAL scan through the OpenClaw runtime ReAct loop."""
+        target = args[0] if args else None
+        if not target:
+            self._console.print("[warning]Usage: /scan <target>[/]")
+            self._console.print("[dim]Example: /scan 10.10.10.5[/]")
+            return
+
+        if not self._runtime:
+            self._console.print("[error]OpenClaw runtime not available. Cannot scan.[/]")
+            return
+
+        # Delegate to the REAL agent loop — this calls LLM which uses MCP tools
+        task_prompt = (
+            f"Perform a comprehensive network scan on target: {target}\n"
+            "1. Use masscan or nmap for fast port discovery\n"
+            "2. Run detailed service/version detection on open ports\n"
+            "3. Identify potential vulnerabilities\n"
+            "4. Summarize all findings with severity ratings"
+        )
+        self._console.print(f"[tool]Starting scan[/] on [bold]{target}[/] via OpenClaw agent...")
+        self._handle_natural_language(task_prompt)
 
     def _cmd_exploit(self, args: list[str]) -> None:
+        """Exploitation phase — requires explicit human approval."""
+        target = args[0] if args else None
         self._console.print(
             Panel(
                 "[warning]⚠️  EXPLOITATION PHASE[/]\n\n"
@@ -284,6 +314,30 @@ class RedClawCLI:
                 border_style="red",
             )
         )
+        # Get user's confirmation
+        try:
+            answer = self._session.prompt("Proceed? [yes/no] > ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            answer = "no"
+
+        if answer != "yes":
+            self._console.print("[dim]Exploitation cancelled.[/]")
+            return
+
+        if not self._runtime:
+            self._console.print("[error]OpenClaw runtime not available.[/]")
+            return
+
+        # Delegate to REAL agent loop
+        task_prompt = (
+            f"Exploitation phase for target: {target or 'engagement targets'}\n"
+            "1. Review all findings from the scanning phase\n"
+            "2. Identify exploitable vulnerabilities\n"
+            "3. Attempt exploitation using available tools (metasploit, sqlmap, etc.)\n"
+            "4. Document evidence for each successful exploit\n"
+            "Human has approved this exploitation attempt."
+        )
+        self._handle_natural_language(task_prompt)
 
     def _cmd_report(self, args: list[str]) -> None:
         output = args[0] if args else "./output/report.md"
@@ -329,25 +383,44 @@ class RedClawCLI:
         self._console.print(table)
 
     def _cmd_tools(self, args: list[str]) -> None:
-        tools = [
-            ("nmap", "Port scanning & service detection"),
-            ("masscan", "Ultra-fast port discovery"),
-            ("nuclei", "Template-based vuln scanning"),
-            ("metasploit", "Exploitation framework"),
-            ("sqlmap", "SQL injection"),
-            ("hydra", "Credential brute-force"),
-            ("linpeas", "Linux privesc enumeration"),
-            ("winpeas", "Windows privesc enumeration"),
-            ("bloodhound", "AD domain analysis"),
-            ("custom_exploit", "Python/Bash exploit scripts"),
+        """List tool servers with REAL availability detection."""
+        tools_meta = [
+            ("nmap", "Port scanning & service detection", "nmap"),
+            ("masscan", "Ultra-fast port discovery", "masscan"),
+            ("nuclei", "Template-based vuln scanning", "nuclei"),
+            ("metasploit", "Exploitation framework", "msfconsole"),
+            ("sqlmap", "SQL injection", "sqlmap"),
+            ("hydra", "Credential brute-force", "hydra"),
+            ("linpeas", "Linux privesc enumeration", "linpeas.sh"),
+            ("winpeas", "Windows privesc enumeration", "winpeas.exe"),
+            ("bloodhound", "AD domain analysis", "bloodhound-python"),
+            ("custom_exploit", "Python/Bash exploit scripts", None),
         ]
+
+        import shutil
         table = Table(title="MCP Tool Servers", border_style="dim")
         table.add_column("Tool", style="tool")
         table.add_column("Description")
         table.add_column("Status", justify="center")
-        for name, desc in tools:
-            table.add_row(name, desc, "🟢 Ready")
+
+        installed = 0
+        for name, desc, binary in tools_meta:
+            if binary is None:
+                # Custom exploit — always available (it's our own code)
+                table.add_row(name, desc, "🟢 Ready")
+                installed += 1
+            elif shutil.which(binary):
+                table.add_row(name, desc, "🟢 Ready")
+                installed += 1
+            else:
+                table.add_row(name, desc, "🔴 Not installed")
+
         self._console.print(table)
+        total = len(tools_meta)
+        self._console.print(
+            f"[dim]{installed}/{total} tools available. "
+            f"Use /setup-tools to install missing tools.[/]"
+        )
 
     def _cmd_sessions(self, args: list[str]) -> None:
         self._console.print(Panel(
@@ -501,8 +574,14 @@ class RedClawCLI:
             if link_file.exists():
                 saved = link_file.read_text().strip()
 
+            # Also show runtime endpoint if different
+            runtime_url = None
+            if self._runtime:
+                status = self._runtime.get_status()
+                runtime_url = status.get("llm_endpoint")
+
             self._console.print(Panel(
-                f"[info]Active URL[/]:  {current or '[dim]not set[/]'}\n"
+                f"[info]Active URL[/]:  {runtime_url or current or '[dim]not set[/]'}\n"
                 f"[info]Saved URL[/]:   {saved or '[dim]none[/]'}\n\n"
                 "[dim]Usage: /link <ngrok_url>[/]",
                 title="[bold]LLM Backend Link[/]",
@@ -521,11 +600,37 @@ class RedClawCLI:
         link_file.parent.mkdir(parents=True, exist_ok=True)
         link_file.write_text(new_url)
 
-        self._console.print(
-            f"[success]✅ LLM backend URL updated:[/]\n"
-            f"   [info]{new_url}[/]\n"
-            f"   [dim]Saved to {link_file}[/]"
-        )
+        # ── Hot-reload: rebuild the LLM provider with the new URL ──────────
+        if self._runtime:
+            self._runtime._config.llm_endpoint = new_url
+            try:
+                import asyncio
+                health = asyncio.run(self._runtime.initialize())
+                reachable = health.get("status") == "ready"
+                if reachable:
+                    self._console.print(
+                        f"[success]✅ LLM backend URL updated and connected:[/]\n"
+                        f"   [info]{new_url}[/]\n"
+                        f"   [success]🟢 LLM reachable![/]"
+                    )
+                else:
+                    self._console.print(
+                        f"[warning]⚠️  LLM backend URL updated but unreachable:[/]\n"
+                        f"   [info]{new_url}[/]\n"
+                        f"   [warning]🟡 Will retry when you send a command[/]"
+                    )
+            except Exception:
+                self._console.print(
+                    f"[success]✅ LLM backend URL updated:[/]\n"
+                    f"   [info]{new_url}[/]\n"
+                    f"   [dim]Saved to {link_file}[/]"
+                )
+        else:
+            self._console.print(
+                f"[success]✅ LLM backend URL updated:[/]\n"
+                f"   [info]{new_url}[/]\n"
+                f"   [dim]Saved to {link_file}[/]"
+            )
 
     def _cmd_clear(self, args: list[str]) -> None:
         self._console.clear()
@@ -571,7 +676,19 @@ class RedClawCLI:
         async def _run():
             async for msg in self._runtime.run_task(text, context=context):
                 if msg.role == "system":
-                    self._console.print(f"  [phase]{msg.content}[/]")
+                    content = msg.content
+                    # Clean up error messages for user display
+                    if "LLM error" in content or "All LLM providers failed" in content:
+                        self._console.print(
+                            "\n[error]❌ Cannot reach LLM backend.[/]\n"
+                            "[warning]  Possible causes:[/]\n"
+                            "  • Kaggle notebook not running or ngrok tunnel expired\n"
+                            "  • Wrong ngrok URL — use [bold]/link <new-url>[/] to update\n"
+                            "  • No local Ollama fallback available\n"
+                            "[dim]  Run /agent for detailed provider health.[/]"
+                        )
+                    else:
+                        self._console.print(f"  [phase]{content}[/]")
                 elif msg.role == "thinking":
                     self._console.print(f"  [tool]{msg.content}[/]")
                 elif msg.role == "tool":
@@ -605,14 +722,21 @@ class RedClawCLI:
         try:
             asyncio.run(_run())
         except Exception as e:
-            self._console.print(f"[error]Agent error: {e}[/]")
+            err_str = str(e)
+            if "All LLM providers failed" in err_str or "LLM" in err_str:
+                self._console.print(
+                    "\n[error]❌ Cannot reach LLM backend.[/]\n"
+                    "[dim]  Use /link <url> to set a new ngrok URL, "
+                    "or /agent for health details.[/]"
+                )
+            else:
+                self._console.print(f"[error]Agent error: {err_str[:200]}[/]")
 
     # ── System status ─────────────────────────────────────────────────────
 
     def _show_system_status(self) -> None:
-        """Show system status on startup."""
+        """Show system status on startup — reflects REAL health."""
         items = [
-            ("OpenClaw Runtime", self._runtime is not None),
             ("State Manager", self._state is not None),
             ("Config Manager", self._config is not None),
             ("GuardianRails", self._guardian is not None),
@@ -621,9 +745,26 @@ class RedClawCLI:
         table = Table(show_header=False, border_style="dim", pad_edge=False)
         table.add_column("Component")
         table.add_column("Status", justify="center")
+
         for name, ready in items:
             status = "[success]✓[/]" if ready else "[warning]○[/]"
             table.add_row(name, status)
+
+        # OpenClaw Runtime — show REAL health
+        if self._runtime:
+            rt_status = self._runtime.get_status()
+            health = rt_status.get('health', 'not_initialized')
+            if health == 'ready':
+                table.add_row("OpenClaw Runtime", "[success]✓ Ready[/]")
+            elif health == 'degraded':
+                table.add_row("OpenClaw Runtime", "[warning]⚠ Degraded (LLM unreachable)[/]")
+            else:
+                table.add_row("OpenClaw Runtime", "[error]✗ Not initialized[/]")
+
+            # Show endpoint being used
+            table.add_row("LLM Endpoint", f"[dim]{rt_status.get('llm_endpoint', '?')}[/]")
+        else:
+            table.add_row("OpenClaw Runtime", "[error]✗ Missing[/]")
 
         self._console.print(Panel(table, title="System Status", border_style="red"))
 
@@ -644,7 +785,15 @@ def _build_runtime():
     from ..mcp_servers.peas_servers import LinPEASServer, WinPEASServer
     from ..mcp_servers.custom_exploit_server import CustomExploitServer
 
-    # Config from environment or defaults
+    # ── Load saved ngrok URL from ~/.redclaw/link.txt if exists ────────────
+    link_file = Path.home() / ".redclaw" / "link.txt"
+    saved_url = None
+    if link_file.exists():
+        saved_url = link_file.read_text().strip()
+        if saved_url:
+            os.environ.setdefault("REDCLAW_LLM_URL", saved_url)
+
+    # Config from environment (which now includes saved URL) or defaults
     config = RuntimeConfig(
         llm_endpoint=os.environ.get(
             "REDCLAW_LLM_URL",
@@ -676,15 +825,43 @@ def _build_runtime():
     })
     runtime.register_tool_bridge(bridge)
 
+    # ── Eagerly initialize OpenClaw so /status shows Ready ─────────────────
+    # This calls initialize() which creates the Phi4Provider and runs a
+    # health check against the LLM endpoints. Even if the LLM is unreachable,
+    # we mark initialized=True so the runtime is ready for when the LLM comes up.
+    import asyncio
+    try:
+        asyncio.run(runtime.initialize())
+    except Exception:
+        # If initialize fails, that's OK — runtime will retry on first task
+        pass
+
     return runtime, guardian, config
 
 
 def main() -> None:
     """Entry point for the CLI."""
+    # ── Logging: console + file during TESTING phase ──────────────────────
+    # TODO: When testing is complete, switch to file-only logging to hide
+    # internal logs from end users. For now, keep console output so errors
+    # are visible during development/debugging.
+    log_dir = Path.home() / ".redclaw" / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_file = log_dir / "redclaw.log"
+
+    # Console handler (visible to user — needed during testing)
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
     )
+
+    # Also log to file for persistent debugging
+    file_handler = logging.FileHandler(log_file, encoding="utf-8")
+    file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(logging.Formatter(
+        "%(asctime)s [%(name)s] %(levelname)s: %(message)s"
+    ))
+    logging.getLogger().addHandler(file_handler)
 
     # ── Zero-touch bootstrap: auto-setup on first run ─────────────────────
     # Runs doctor + installs missing tools + installs Claude Code CLI.
