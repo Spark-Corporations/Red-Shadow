@@ -67,6 +67,17 @@ class Phi4Provider:
         ])
     """
 
+    @staticmethod
+    def _normalize_endpoint(url: str) -> str:
+        """Strip trailing slashes to prevent double-slash in URL paths.
+
+        Without this:
+            'https://xxx.ngrok-free.app/' + '/v1' = '//v1' → HTTP 404
+        With this:
+            'https://xxx.ngrok-free.app'  + '/v1' = '/v1' → 200 OK
+        """
+        return url.rstrip("/")
+
     def __init__(
         self,
         kaggle_endpoint: str = "http://localhost:5000/v1",
@@ -81,9 +92,10 @@ class Phi4Provider:
         self._providers: list[ProviderConfig] = []
 
         # Primary: Kaggle Phi-4
+        kaggle_ep = self._normalize_endpoint(kaggle_endpoint)
         self._providers.append(ProviderConfig(
             name="kaggle_phi4",
-            endpoint=kaggle_endpoint,
+            endpoint=kaggle_ep,
             model=model,
             api_key=kaggle_api_key,
             max_tokens=max_tokens,
@@ -94,9 +106,10 @@ class Phi4Provider:
 
         # Fallback: Ollama
         if ollama_endpoint:
+            ollama_ep = self._normalize_endpoint(ollama_endpoint)
             self._providers.append(ProviderConfig(
                 name="ollama",
-                endpoint=ollama_endpoint,
+                endpoint=ollama_ep,
                 model=model,
                 max_tokens=max_tokens,
                 temperature=temperature,

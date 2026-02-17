@@ -121,11 +121,12 @@ class OpenClawRuntime:
         Initialize runtime: create LLM provider, verify connectivity.
         Returns health status dict.
         """
-        # Create provider
+        # Create provider — normalize URL to avoid double-slash
+        endpoint = self._config.llm_endpoint.rstrip("/")
         self._provider = Phi4Provider(
-            kaggle_endpoint=self._config.llm_endpoint + "/v1"
-            if not self._config.llm_endpoint.endswith("/v1")
-            else self._config.llm_endpoint,
+            kaggle_endpoint=endpoint + "/v1"
+            if not endpoint.endswith("/v1")
+            else endpoint,
             kaggle_api_key=self._config.llm_api_key,
             ollama_endpoint=self._config.ollama_endpoint,
             model=self._config.llm_model,
