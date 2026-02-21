@@ -243,6 +243,9 @@ class OpenClawRuntime:
             )
 
             # ── 3a: Call LLM ──────────────────────────────────────────────
+            # Trim conversation if it's growing too large for context window
+            self._trim_conversation_if_needed()
+
             try:
                 llm_response: LLMResponse = await self._provider.chat(
                     messages=self._conversation,
@@ -392,6 +395,56 @@ class OpenClawRuntime:
         )
 
     # ── Internal Helpers ──────────────────────────────────────────────────
+
+    def _trim_conversation_if_needed(self) -> None:
+        """
+        Trim conversation history when it grows too large for the context window.
+
+        Strategy:
+          - Estimate token count (~4 chars per token)
+          - If over 75% of context limit (4096), remove middle messages
+          - Always keep: system prompt (idx 0), user task (idx 1), last 4 messages
+          - Insert a summary marker where messages were removed
+        """
+        context_limit = 4096
+        threshold = int(context_limit * 0.75)  # 3072 tokens
+
+        # Estimate current token usage
+        total_chars = sum(len(str(m.get("content", ""))) for m in self._conversation)
+        estimated_tokens = total_chars // 4  # rough estimate
+
+        if estimated_tokens <= threshold:
+            return  # within budget
+
+        if len(self._conversation) <= 6:
+            return  # too few messages to trim
+
+        # Keep: first 2 (system + user) + last 4 (recent context)
+        keep_start = 2
+        keep_end = 4
+        n = len(self._conversation)
+
+        preserved_head = self._conversation[:keep_start]
+        preserved_tail = self._conversation[n - keep_end:]
+        removed_count = n - keep_start - keep_end
+
+        # Insert a summary note so the model knows history was trimmed
+        summary_msg = {
+            "role": "system",
+            "content": (
+                f"[CONTEXT TRIMMED: {removed_count} earlier messages removed to fit "
+                f"context window. Current iteration: {self._iteration_count}. "
+                f"Continue with the task based on recent results below.]"
+            ),
+        }
+
+        self._conversation = preserved_head + [summary_msg] + preserved_tail
+
+        new_chars = sum(len(str(m.get("content", ""))) for m in self._conversation)
+        logger.info(
+            f"  Conversation trimmed: {n} → {len(self._conversation)} messages, "
+            f"~{estimated_tokens} → ~{new_chars // 4} tokens"
+        )
 
     def _build_system_prompt(self, context: dict[str, Any]) -> str:
         """

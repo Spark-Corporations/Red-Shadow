@@ -146,7 +146,11 @@ class ToolBridge:
         # Execute via MCP server
         try:
             target = request.parameters.get("target", "")
-            options = request.parameters.get("options", {})
+            # Pass ALL parameters as options — LLM may set timeout, session, etc.
+            # at top-level rather than inside an "options" sub-dict
+            options = dict(request.parameters)  # copy all params
+            options.pop("target", None)  # already extracted
+            options.pop("command", None)  # already extracted above
 
             # MCP servers implement an `execute` method
             if hasattr(server, "execute_tool"):
