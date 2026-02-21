@@ -82,7 +82,7 @@ class Phi4Provider:
         max_tokens: int = 8192,
         temperature: float = 0.1,
         timeout: int = 120,
-        retry_count: int = 3,
+        retry_count: int = 5,
     ):
         self._providers: list[ProviderConfig] = []
 
@@ -228,7 +228,9 @@ class Phi4Provider:
           2. Prompt-based fallback (tools embedded in system prompt, parse JSON output)
         
         Falls back to mode 2 if mode 1 returns HTTP 400 (vLLM without --enable-auto-tool-choice).
+        Handles HTTP 429 (rate limiting) with exponential backoff.
         """
+        import asyncio
         start = time.monotonic()
 
         payload = {
@@ -251,11 +253,38 @@ class Phi4Provider:
 
         url = f"{provider.endpoint}/chat/completions"
 
-        async with aiohttp.ClientSession() as session:
+        rate_limit_retries = 0
+        max_rate_limit_retries = 3
+
+        while True:
+          async with aiohttp.ClientSession() as session:
             async with session.post(
                 url, json=payload, headers=headers,
                 timeout=aiohttp.ClientTimeout(total=provider.timeout)
             ) as resp:
+                # ── Handle 429 Rate Limiting ──
+                if resp.status == 429:
+                    rate_limit_retries += 1
+                    if rate_limit_retries > max_rate_limit_retries:
+                        text = await resp.text()
+                        raise RuntimeError(f"Rate limited after {max_rate_limit_retries} retries: {text[:200]}")
+
+                    # Use Retry-After header or default backoff
+                    retry_after = resp.headers.get("Retry-After")
+                    if retry_after and retry_after.isdigit():
+                        wait_time = int(retry_after)
+                    else:
+                        # Free models need longer backoff
+                        is_free = ":free" in provider.model.lower()
+                        wait_time = (10 if is_free else 3) * rate_limit_retries
+
+                    logger.info(
+                        f"Rate limited (429), waiting {wait_time}s before retry "
+                        f"{rate_limit_retries}/{max_rate_limit_retries}"
+                    )
+                    await asyncio.sleep(wait_time)
+                    continue
+
                 if resp.status == 400:
                     error_text = await resp.text()
                     error_lower = error_text.lower()
@@ -318,6 +347,7 @@ class Phi4Provider:
                     raise RuntimeError(f"HTTP {resp.status}: {text[:200]}")
 
                 data = await resp.json()
+                break  # exit the while True loop
 
         latency = time.monotonic() - start
         choice = data.get("choices", [{}])[0]

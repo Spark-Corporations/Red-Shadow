@@ -1089,15 +1089,23 @@ class RedClawCLI:
                 if msg.role == "system":
                     content = msg.content
                     # Clean up error messages for user display
-                    if "LLM error" in content or "All LLM providers failed" in content:
-                        self._console.print(
-                            "\n[error]❌ Cannot reach LLM backend.[/]\n"
-                            "[warning]  Possible causes:[/]\n"
-                            "  • Kaggle notebook not running or ngrok tunnel expired\n"
-                            "  • Wrong ngrok URL — use [bold]/link <new-url>[/] to update\n"
-                            "  • No local Ollama fallback available\n"
-                            "[dim]  Run /agent for detailed provider health.[/]"
-                        )
+                    if "All LLM providers failed" in content or "LLM error" in content:
+                        # Detect rate limiting vs connection failure
+                        is_rate_limit = "Rate limited" in content or "429" in content
+                        if is_rate_limit:
+                            self._console.print(
+                                "\n[warning]⚠️  Rate limited by provider.[/]\n"
+                                "[dim]  Free models have strict rate limits.\n"
+                                "  Wait a moment or switch: /model gemini[/]"
+                            )
+                        else:
+                            self._console.print(
+                                "\n[error]❌ Cannot reach LLM backend.[/]\n"
+                                "[warning]  Check:[/]\n"
+                                "  • API key set? → /apikey\n"
+                                "  • Model reachable? → /agent\n"
+                                "  • Try switching: /model gemini\n"
+                            )
                     else:
                         self._console.print(f"  [phase]{content}[/]")
                 elif msg.role == "thinking":
@@ -1134,12 +1142,18 @@ class RedClawCLI:
             asyncio.run(_run())
         except Exception as e:
             err_str = str(e)
-            if "All LLM providers failed" in err_str or "LLM" in err_str:
-                self._console.print(
-                    "\n[error]❌ Cannot reach LLM backend.[/]\n"
-                    "[dim]  Use /link <url> to set a new ngrok URL, "
-                    "or /agent for health details.[/]"
-                )
+            if "All LLM providers failed" in err_str or "LLM" in err_str or "Rate limited" in err_str:
+                is_rate_limit = "Rate limited" in err_str or "429" in err_str
+                if is_rate_limit:
+                    self._console.print(
+                        "\n[warning]⚠️  Rate limited by provider.[/]\n"
+                        "[dim]  Wait a moment or switch to a different model: /model gemini[/]"
+                    )
+                else:
+                    self._console.print(
+                        "\n[error]❌ Cannot reach LLM backend.[/]\n"
+                        "[dim]  Check: /apikey, /model, /agent[/]"
+                    )
             else:
                 self._console.print(f"[error]Agent error: {err_str[:200]}[/]")
 
