@@ -341,7 +341,7 @@ class ProxyServer:
         headers = {"Content-Type": "application/json"}
 
         if is_stream:
-            return await self._handle_stream(openai_payload, backend_url, headers)
+            return await self._handle_stream(request, openai_payload, backend_url, headers)
         else:
             return await self._handle_non_stream(openai_payload, backend_url, headers)
 
@@ -376,9 +376,9 @@ class ProxyServer:
             )
 
     async def _handle_stream(
-        self, payload: dict, url: str, headers: dict
+        self, request: web.Request, payload: dict, url: str, headers: dict
     ) -> web.StreamResponse:
-        """Forward streaming request with event translation."""
+        """Forward streaming request with Anthropic SSE event translation."""
         response = web.StreamResponse(
             status=200,
             headers={
@@ -387,7 +387,7 @@ class ProxyServer:
                 "Connection": "keep-alive",
             },
         )
-        await response.prepare(request=None)  # Will be set by aiohttp
+        await response.prepare(request)  # FIXED: pass actual request object
 
         msg_id = f"msg_{uuid.uuid4().hex[:20]}"
         chunk_idx = 0
@@ -399,6 +399,17 @@ class ProxyServer:
                     url, json=payload, headers=headers,
                     timeout=aiohttp.ClientTimeout(total=120),
                 ) as resp:
+                    if resp.status != 200:
+                        # Backend error — still try to send an error event
+                        error_text = await resp.text()
+                        logger.error(f"Stream backend error: {resp.status} — {error_text[:300]}")
+                        error_event = json.dumps({
+                            "type": "error",
+                            "error": {"type": "api_error", "message": error_text[:500]},
+                        })
+                        await response.write(f"event: error\ndata: {error_event}\n\n".encode())
+                        return response
+
                     async for line in resp.content:
                         line_str = line.decode("utf-8").strip()
                         if not line_str.startswith("data: "):
@@ -411,9 +422,11 @@ class ProxyServer:
                             events = openai_chunk_to_anthropic_event(
                                 chunk, chunk_idx, msg_id
                             )
-                            for event in events:
+                            for event_data in events:
+                                event_obj = json.loads(event_data)
+                                event_type = event_obj.get("type", "message")
                                 await response.write(
-                                    f"event: message\ndata: {event}\n\n".encode()
+                                    f"event: {event_type}\ndata: {event_data}\n\n".encode()
                                 )
                             chunk_idx += 1
                         except json.JSONDecodeError:
@@ -421,6 +434,15 @@ class ProxyServer:
 
         except Exception as e:
             logger.error(f"Stream proxy error: {e}")
+            # Send error event so Claude Code doesn't hang
+            try:
+                error_event = json.dumps({
+                    "type": "error",
+                    "error": {"type": "proxy_error", "message": str(e)[:500]},
+                })
+                await response.write(f"event: error\ndata: {error_event}\n\n".encode())
+            except Exception:
+                pass
 
         return response
 

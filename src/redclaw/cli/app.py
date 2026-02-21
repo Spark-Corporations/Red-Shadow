@@ -316,7 +316,7 @@ class RedClawCLI:
         )
         # Get user's confirmation
         try:
-            answer = self._session.prompt("Proceed? [yes/no] > ").strip().lower()
+            answer = input("Proceed? [yes/no] > ").strip().lower()
         except (EOFError, KeyboardInterrupt):
             answer = "no"
 
@@ -775,6 +775,7 @@ def _build_runtime():
     from ..openclaw_bridge.runtime import OpenClawRuntime, RuntimeConfig
     from ..openclaw_bridge.tool_bridge import ToolBridge
     from ..core.guardian import GuardianRails
+    # Original 10 MCP servers
     from ..mcp_servers.nmap_server import NmapServer
     from ..mcp_servers.masscan_server import MasscanServer
     from ..mcp_servers.nuclei_server import NucleiServer
@@ -784,8 +785,12 @@ def _build_runtime():
     from ..mcp_servers.bloodhound_server import BloodHoundServer
     from ..mcp_servers.peas_servers import LinPEASServer, WinPEASServer
     from ..mcp_servers.custom_exploit_server import CustomExploitServer
+    # New agentic core tools (3 servers, 6 tools)
+    from ..mcp_servers.terminal_server import TerminalServer
+    from ..mcp_servers.agent_control_server import AgentControlServer
+    from ..mcp_servers.file_server import FileServer
 
-    # ── Load saved ngrok URL from ~/.redclaw/link.txt if exists ────────────
+    # ── Load saved URL from ~/.redclaw/link.txt if exists ──────────────────
     link_file = Path.home() / ".redclaw" / "link.txt"
     saved_url = None
     if link_file.exists():
@@ -793,13 +798,13 @@ def _build_runtime():
         if saved_url:
             os.environ.setdefault("REDCLAW_LLM_URL", saved_url)
 
-    # Config from environment (which now includes saved URL) or defaults
+    # Config from environment or defaults — now defaults to GCP Qwen endpoint
     config = RuntimeConfig(
         llm_endpoint=os.environ.get(
             "REDCLAW_LLM_URL",
-            "https://0b2f-34-29-72-116.ngrok-free.app"
+            "http://35.223.143.247:8002"
         ),
-        llm_model=os.environ.get("REDCLAW_LLM_MODEL", "phi-4"),
+        llm_model=os.environ.get("REDCLAW_LLM_MODEL", "qwen-coder"),
         llm_api_key=os.environ.get("REDCLAW_LLM_KEY"),
     )
 
@@ -809,26 +814,30 @@ def _build_runtime():
     # Create runtime
     runtime = OpenClawRuntime(config)
 
-    # Create and wire ToolBridge with all MCP servers
+    # Create and wire ToolBridge with all MCP servers (13 total)
     bridge = ToolBridge(guardian=guardian)
     bridge.register_servers({
+        # ── Scanning & Recon ──
         "nmap": NmapServer(),
         "masscan": MasscanServer(),
         "nuclei": NucleiServer(),
+        # ── Exploitation ──
         "metasploit": MetasploitServer(),
         "sqlmap": SQLMapServer(),
         "hydra": HydraServer(),
+        "custom_exploit": CustomExploitServer(),
+        # ── Post-Exploitation ──
         "bloodhound": BloodHoundServer(),
         "linpeas": LinPEASServer(),
         "winpeas": WinPEASServer(),
-        "custom_exploit": CustomExploitServer(),
+        # ── Agentic Core (NEW) ──
+        "terminal": TerminalServer(),
+        "agent_control": AgentControlServer(),
+        "file_ops": FileServer(),
     })
     runtime.register_tool_bridge(bridge)
 
     # ── Eagerly initialize OpenClaw so /status shows Ready ─────────────────
-    # This calls initialize() which creates the Phi4Provider and runs a
-    # health check against the LLM endpoints. Even if the LLM is unreachable,
-    # we mark initialized=True so the runtime is ready for when the LLM comes up.
     import asyncio
     try:
         asyncio.run(runtime.initialize())

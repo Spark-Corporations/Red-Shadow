@@ -226,7 +226,14 @@ class Phi4Provider:
         tools: Optional[list[dict[str, Any]]],
         stream: bool,
     ) -> LLMResponse:
-        """Make an API call to a specific provider."""
+        """Make an API call to a specific provider.
+        
+        Supports two tool-calling modes:
+          1. Native API tool-calling (tools + tool_choice=auto in payload)
+          2. Prompt-based fallback (tools embedded in system prompt, parse JSON output)
+        
+        Falls back to mode 2 if mode 1 returns HTTP 400 (vLLM without --enable-auto-tool-choice).
+        """
         start = time.monotonic()
 
         payload = {
@@ -234,9 +241,12 @@ class Phi4Provider:
             "messages": messages,
             "max_tokens": provider.max_tokens,
             "temperature": provider.temperature,
-            "stream": False,  # non-streaming for this method
+            "stream": False,
         }
-        if tools:
+
+        # Try native tool-calling first
+        use_native_tools = tools is not None
+        if use_native_tools:
             payload["tools"] = tools
             payload["tool_choice"] = "auto"
 
@@ -251,6 +261,18 @@ class Phi4Provider:
                 url, json=payload, headers=headers,
                 timeout=aiohttp.ClientTimeout(total=provider.timeout)
             ) as resp:
+                if resp.status == 400 and use_native_tools:
+                    # Native tool-calling not supported — fall back to prompt-based
+                    error_text = await resp.text()
+                    if "tool" in error_text.lower() or "auto" in error_text.lower():
+                        logger.info(
+                            "Native tool-calling not available, switching to prompt-based mode"
+                        )
+                        return await self._call_provider_prompt_tools(
+                            provider, messages, tools, headers, url, start
+                        )
+                    raise RuntimeError(f"HTTP 400: {error_text[:200]}")
+
                 if resp.status != 200:
                     text = await resp.text()
                     raise RuntimeError(f"HTTP {resp.status}: {text[:200]}")
@@ -273,6 +295,141 @@ class Phi4Provider:
 
         return LLMResponse(
             content=message.get("content", ""),
+            tool_calls=tool_calls,
+            finish_reason=choice.get("finish_reason", ""),
+            usage=data.get("usage", {}),
+            model=data.get("model", provider.model),
+            latency=latency,
+        )
+
+    async def _call_provider_prompt_tools(
+        self,
+        provider: ProviderConfig,
+        messages: list[dict[str, str]],
+        tools: list[dict[str, Any]],
+        headers: dict[str, str],
+        url: str,
+        start: float,
+    ) -> LLMResponse:
+        """
+        Prompt-based tool-calling fallback.
+        
+        When vLLM doesn't support native tool-calling (no --enable-auto-tool-choice),
+        we embed tool schemas directly into the system prompt and instruct the model
+        to output JSON tool calls, which we then parse.
+        """
+        import re
+
+        # Build tool schema text for the system prompt
+        tool_descriptions = []
+        for tool in tools:
+            func = tool.get("function", tool)
+            name = func.get("name", "unknown")
+            desc = func.get("description", "")
+            params = func.get("parameters", {})
+            props = params.get("properties", {})
+            required = params.get("required", [])
+
+            param_lines = []
+            for pname, pinfo in props.items():
+                req_mark = " (REQUIRED)" if pname in required else ""
+                ptype = pinfo.get("type", "string")
+                pdesc = pinfo.get("description", "")
+                param_lines.append(f"    - {pname}: {ptype}{req_mark} — {pdesc}")
+
+            tool_descriptions.append(
+                f"  {name}: {desc}\n" + "\n".join(param_lines)
+            )
+
+        tools_text = "\n".join(tool_descriptions)
+
+        # Inject tool instructions into system message
+        tool_instruction = (
+            "\n\n<available_tools>\n"
+            "You have the following tools available. To call a tool, output ONLY a JSON block like this:\n"
+            '```json\n{"tool_call": {"name": "TOOL_NAME", "arguments": {"param": "value"}}}\n```\n'
+            "You may also include text before or after the JSON block.\n"
+            "If you want to call multiple tools, output multiple JSON blocks.\n\n"
+            f"Tools:\n{tools_text}\n"
+            "</available_tools>"
+        )
+
+        # Modify messages: append tool instruction to system message
+        modified_messages = []
+        system_injected = False
+        for msg in messages:
+            if msg.get("role") == "system" and not system_injected:
+                modified_messages.append({
+                    **msg,
+                    "content": msg.get("content", "") + tool_instruction,
+                })
+                system_injected = True
+            else:
+                modified_messages.append(msg)
+
+        if not system_injected:
+            # No system message found — add one
+            modified_messages.insert(0, {
+                "role": "system",
+                "content": tool_instruction,
+            })
+
+        # Send without API tools
+        payload = {
+            "model": provider.model,
+            "messages": modified_messages,
+            "max_tokens": provider.max_tokens,
+            "temperature": provider.temperature,
+            "stream": False,
+        }
+
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                url, json=payload, headers=headers,
+                timeout=aiohttp.ClientTimeout(total=provider.timeout)
+            ) as resp:
+                if resp.status != 200:
+                    text = await resp.text()
+                    raise RuntimeError(f"HTTP {resp.status} (prompt-tools): {text[:200]}")
+                data = await resp.json()
+
+        latency = time.monotonic() - start
+        choice = data.get("choices", [{}])[0]
+        message = choice.get("message", {})
+        content = message.get("content", "")
+
+        # Parse tool calls from model's text output
+        tool_calls = []
+        remaining_text = content
+
+        # Match JSON blocks: ```json { ... } ``` or bare { "tool_call": ... }
+        json_pattern = re.compile(
+            r'```(?:json)?\s*(\{[^`]*?\})\s*```'   # fenced JSON blocks
+            r'|'
+            r'(\{"tool_call"\s*:\s*\{[^}]*\}[^}]*\})',  # bare JSON
+            re.DOTALL
+        )
+
+        for match in json_pattern.finditer(content):
+            json_str = match.group(1) or match.group(2)
+            try:
+                parsed = json.loads(json_str)
+                tc = parsed.get("tool_call", parsed)
+                name = tc.get("name", "")
+                args = tc.get("arguments", tc.get("args", {}))
+                if name:
+                    tool_calls.append({
+                        "id": f"prompt_call_{len(tool_calls)}",
+                        "name": name,
+                        "arguments": args if isinstance(args, dict) else {},
+                    })
+                    # Remove the JSON block from the displayed content
+                    remaining_text = remaining_text.replace(match.group(0), "").strip()
+            except (json.JSONDecodeError, AttributeError):
+                continue
+
+        return LLMResponse(
+            content=remaining_text,
             tool_calls=tool_calls,
             finish_reason=choice.get("finish_reason", ""),
             usage=data.get("usage", {}),
