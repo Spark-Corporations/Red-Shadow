@@ -41,7 +41,7 @@ class ProviderConfig:
     endpoint: str
     model: str
     api_key: Optional[str] = None
-    max_tokens: int = 4096
+    max_tokens: int = 8192
     temperature: float = 0.1
     timeout: int = 120
     retry_count: int = 3
@@ -84,7 +84,7 @@ class Phi4Provider:
         kaggle_api_key: Optional[str] = None,
         ollama_endpoint: str = "http://localhost:11434/v1",
         model: str = "phi-4",
-        max_tokens: int = 4096,
+        max_tokens: int = 8192,
         temperature: float = 0.1,
         timeout: int = 120,
         retry_count: int = 3,
@@ -363,13 +363,9 @@ class Phi4Provider:
 
         # Inject tool instructions into system message
         tool_instruction = (
-            "\n\n<available_tools>\n"
-            "You have the following tools available. To call a tool, output ONLY a JSON block like this:\n"
-            '```json\n{"tool_call": {"name": "TOOL_NAME", "arguments": {"param": "value"}}}\n```\n'
-            "You may also include text before or after the JSON block.\n"
-            "If you want to call multiple tools, output multiple JSON blocks.\n\n"
-            f"Tools:\n{tools_text}\n"
-            "</available_tools>"
+            "\n\nTo call a tool, output a JSON block: "
+            '{"tool_call": {"name": "TOOL_NAME", "arguments": {"param": "value"}}}\n'
+            f"Available tools:\n{tools_text}\n"
         )
 
         # Modify messages: append tool instruction to system message
@@ -394,8 +390,8 @@ class Phi4Provider:
 
         # Send without API tools — use adaptive max_tokens
         # Dynamically cap to leave room for input tokens within context window
-        # Context limit is typically 4096 for Qwen on current vLLM config
-        context_limit = 4096
+        # Context limit — use 8192 for Qwen2.5-Coder; adaptive retry handles if server caps lower
+        context_limit = 8192
         safety_margin = 64
         # Start conservative: leave ~40% for output, but never exceed 1024
         adaptive_max = min(provider.max_tokens, 1024)
