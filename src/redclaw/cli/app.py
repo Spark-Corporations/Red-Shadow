@@ -830,6 +830,9 @@ class RedClawCLI:
             /model openai   → GPT-4o-mini via OpenAI API  
             /model groq     → Llama 3.3 70B via Groq API
             /model openrouter → Qwen 2.5 Coder via OpenRouter
+            /model gpt-oss  → GPT-OSS 120B (FREE, OpenRouter)
+            /model dolphin  → Dolphin Mistral 24B (FREE, OpenRouter)
+            /model nemotron → Nemotron 3 Nano 30B (FREE, OpenRouter)
             /model qwen     → (legacy) self-hosted Qwen via GCP IP
             /model phi      → (legacy) self-hosted Phi-4 via ngrok
         """
@@ -869,6 +872,30 @@ class RedClawCLI:
                 "endpoint": "https://openrouter.ai/api/v1",
                 "source": "OpenRouter API",
                 "icon": "🟣",
+                "needs_key": True,
+            },
+            "gpt-oss": {
+                "display": "GPT-OSS 120B (FREE)",
+                "model_name": "openai/gpt-oss-120b:free",
+                "endpoint": "https://openrouter.ai/api/v1",
+                "source": "OpenRouter (Free)",
+                "icon": "🟢",
+                "needs_key": True,
+            },
+            "dolphin": {
+                "display": "Dolphin Mistral 24B (FREE)",
+                "model_name": "cognitivecomputations/dolphin-mistral-24b-venice-edition:free",
+                "endpoint": "https://openrouter.ai/api/v1",
+                "source": "OpenRouter (Free)",
+                "icon": "🐬",
+                "needs_key": True,
+            },
+            "nemotron": {
+                "display": "Nemotron 3 Nano 30B (FREE)",
+                "model_name": "nvidia/nemotron-3-nano-30b-a3b:free",
+                "endpoint": "https://openrouter.ai/api/v1",
+                "source": "OpenRouter (Free)",
+                "icon": "🟩",
                 "needs_key": True,
             },
             "qwen": {
@@ -913,6 +940,7 @@ class RedClawCLI:
                 f"[info]API Key[/]:         {'✅ Set' if has_key else '❌ Not set — use /apikey <key>'}",
                 "",
                 "[dim]API Providers:[/]   gemini | openai | groq | openrouter",
+                "[dim]Free Models:[/]    gpt-oss | dolphin | nemotron",
                 "[dim]Self-hosted:[/]     qwen | phi",
                 "",
                 "[dim]Switch: /model <name>[/]",
@@ -1185,6 +1213,9 @@ def _build_runtime():
         "openai":     ("gpt-4o-mini", "https://api.openai.com/v1"),
         "groq":       ("llama-3.3-70b-versatile", "https://api.groq.com/openai/v1"),
         "openrouter": ("qwen/qwen-2.5-coder-32b-instruct", "https://openrouter.ai/api/v1"),
+        "gpt-oss":    ("openai/gpt-oss-120b:free", "https://openrouter.ai/api/v1"),
+        "dolphin":    ("cognitivecomputations/dolphin-mistral-24b-venice-edition:free", "https://openrouter.ai/api/v1"),
+        "nemotron":   ("nvidia/nemotron-3-nano-30b-a3b:free", "https://openrouter.ai/api/v1"),
     }
 
     if active_model in provider_table:
