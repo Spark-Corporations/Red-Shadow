@@ -463,18 +463,48 @@ class Phi4Provider:
         tool_calls = []
         remaining_text = content
 
-        # Match JSON blocks: ```json { ... } ``` or bare { "tool_call": ... }
-        json_pattern = re.compile(
-            r'```(?:json)?\s*(\{[^`]*?\})\s*```'   # fenced JSON blocks
-            r'|'
-            r'(\{"tool_call"\s*:\s*\{[^}]*\}[^}]*\})',  # bare JSON
-            re.DOTALL
-        )
+        # Strategy: extract all complete JSON objects from text using brace-balancing
+        # This handles nested braces (e.g. {"arguments": {"target": "..."}} )
+        def extract_json_objects(text: str) -> list[tuple[str, int, int]]:
+            """Find all complete JSON objects in text via brace counting."""
+            results = []
+            i = 0
+            while i < len(text):
+                if text[i] == '{':
+                    depth = 0
+                    start = i
+                    in_string = False
+                    escape = False
+                    for j in range(i, len(text)):
+                        c = text[j]
+                        if escape:
+                            escape = False
+                            continue
+                        if c == '\\':
+                            escape = True
+                            continue
+                        if c == '"' and not escape:
+                            in_string = not in_string
+                        elif not in_string:
+                            if c == '{':
+                                depth += 1
+                            elif c == '}':
+                                depth -= 1
+                                if depth == 0:
+                                    results.append((text[start:j+1], start, j+1))
+                                    i = j + 1
+                                    break
+                    else:
+                        i += 1  # unclosed brace, skip
+                else:
+                    i += 1
+            return results
 
-        for match in json_pattern.finditer(content):
-            json_str = match.group(1) or match.group(2)
+        # Also handle fenced code blocks: ```json ... ```
+        fenced_pattern = re.compile(r'```(?:json)?\s*(\{.*?\})\s*```', re.DOTALL)
+        for fm in fenced_pattern.finditer(content):
             try:
-                parsed = json.loads(json_str)
+                parsed = json.loads(fm.group(1))
                 tc = parsed.get("tool_call", parsed)
                 name = tc.get("name", "")
                 args = tc.get("arguments", tc.get("args", {}))
@@ -484,10 +514,40 @@ class Phi4Provider:
                         "name": name,
                         "arguments": args if isinstance(args, dict) else {},
                     })
-                    # Remove the JSON block from the displayed content
-                    remaining_text = remaining_text.replace(match.group(0), "").strip()
+                    remaining_text = remaining_text.replace(fm.group(0), "").strip()
             except (json.JSONDecodeError, AttributeError):
                 continue
+
+        # Extract bare JSON objects if no fenced blocks found tool calls
+        if not tool_calls:
+            for json_str, start_idx, end_idx in extract_json_objects(content):
+                try:
+                    parsed = json.loads(json_str)
+                    # Accept {"tool_call": {"name": ..., "arguments": ...}}
+                    # or direct {"name": ..., "arguments": ...}
+                    tc = parsed.get("tool_call", parsed)
+                    name = tc.get("name", "")
+                    args = tc.get("arguments", tc.get("args", {}))
+                    if name and ("arguments" in tc or "args" in tc):
+                        tool_calls.append({
+                            "id": f"prompt_call_{len(tool_calls)}",
+                            "name": name,
+                            "arguments": args if isinstance(args, dict) else {},
+                        })
+                        remaining_text = remaining_text.replace(json_str, "").strip()
+                except (json.JSONDecodeError, AttributeError):
+                    continue
+
+        # Strip hallucinated <tool_response> blocks — model sometimes fakes results
+        remaining_text = re.sub(
+            r'<tool_response>.*?</tool_response>',
+            '', remaining_text, flags=re.DOTALL
+        ).strip()
+        # Also strip unclosed <tool_response> at end
+        remaining_text = re.sub(
+            r'<tool_response>.*$',
+            '', remaining_text, flags=re.DOTALL
+        ).strip()
 
         return LLMResponse(
             content=remaining_text,

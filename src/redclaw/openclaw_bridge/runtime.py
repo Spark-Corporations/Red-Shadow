@@ -536,6 +536,49 @@ class OpenClawRuntime:
             "</safety_rules>\n\n"
         )
 
+        # ── Anti-Hallucination Rules ─────────────────────────────────
+        prompt += (
+            "<critical_rules>\n"
+            "NEVER fabricate tool results. You will ONLY see real tool output from the system.\n"
+            "NEVER output <tool_response> or fake results — this breaks the pipeline.\n"
+            "If a tool times out or fails, adapt and try a different approach.\n"
+            "Wait for REAL tool results before analyzing. Do NOT invent or simulate output.\n"
+            "</critical_rules>\n\n"
+        )
+
+        # ── Attack Methodology ───────────────────────────────────────
+        prompt += (
+            "<attack_methodology>\n"
+            "Follow this structured penetration testing workflow:\n\n"
+            "PHASE 1 — RECONNAISSANCE:\n"
+            "  - Run nmap_scan with top ports first (faster), then full port scan if needed\n"
+            "  - Identify open ports, services, versions\n"
+            "  - After scan completes, ALWAYS report findings as a numbered list:\n"
+            "    1. Port X — Service Y (version Z) — Potential vulnerabilities\n"
+            "    2. Port X — Service Y ...\n\n"
+            "PHASE 2 — VULNERABILITY ANALYSIS:\n"
+            "  - For each open service, research known CVEs and misconfigurations\n"
+            "  - Run vulnerability-specific scripts (nmap --script vuln, nuclei, etc.)\n"
+            "  - Call save_finding for each confirmed vulnerability\n"
+            "  - Present a prioritized attack plan to the user\n\n"
+            "PHASE 3 — EXPLOITATION:\n"
+            "  - Start with highest severity vulnerabilities first\n"
+            "  - Request user approval before each exploit attempt\n"
+            "  - Execute exploit, capture evidence (screenshots, flags, hashes)\n"
+            "  - Document each step: what worked, what failed\n\n"
+            "PHASE 4 — POST-EXPLOITATION (if access gained):\n"
+            "  - Enumerate system: users, SUID, cron, network, files\n"
+            "  - Attempt privilege escalation if authorized\n"
+            "  - Pivot to other targets if in scope\n\n"
+            "PHASE 5 — REPORT:\n"
+            "  - Summarize all findings with severity (Critical/High/Medium/Low/Info)\n"
+            "  - Include remediation recommendations\n"
+            "  - List all commands executed and evidence collected\n\n"
+            "IMPORTANT: Always move to the next phase automatically after completing the current one.\n"
+            "Do NOT stop after reconnaissance — proceed to analysis and exploitation.\n"
+            "</attack_methodology>\n\n"
+        )
+
         # ── Current Context ───────────────────────────────────────────
         prompt += (
             "<current_context>\n"
