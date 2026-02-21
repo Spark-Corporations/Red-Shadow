@@ -95,6 +95,7 @@ SLASH_COMMANDS = {
     "/doctor": "Health-check all tool dependencies",
     "/setup-tools": "Auto-install missing pentesting tools",
     "/link": "View/update ngrok LLM backend URL",
+    "/ip_m": "Update model IP when GCP restarts (e.g. /ip_m 35.223.143.247)",
     "/clear": "Clear the terminal",
     "/quit": "Exit RedClaw",
 }
@@ -198,6 +199,7 @@ class RedClawCLI:
             "/doctor": self._cmd_doctor,
             "/setup-tools": self._cmd_setup_tools,
             "/link": self._cmd_link,
+            "/ip_m": self._cmd_ip_m,
             "/clear": self._cmd_clear,
             "/quit": self._cmd_quit,
         }
@@ -632,6 +634,102 @@ class RedClawCLI:
                 f"   [dim]Saved to {link_file}[/]"
             )
 
+    def _cmd_ip_m(self, args: list[str]) -> None:
+        """Update the model's IP address when GCP instance restarts.
+
+        Usage:
+            /ip_m                    → show current model IP
+            /ip_m 35.223.143.247     → update to new IP (keeps port 8002)
+            /ip_m 35.223.143.247:8003 → update IP and port
+        """
+        ip_file = Path.home() / ".redclaw" / "model_ip.txt"
+        default_port = "8002"
+
+        if not args:
+            # Show current model IP
+            current_endpoint = None
+            if self._runtime:
+                status = self._runtime.get_status()
+                current_endpoint = status.get("llm_endpoint")
+
+            saved_ip = None
+            if ip_file.exists():
+                saved_ip = ip_file.read_text().strip()
+
+            self._console.print(Panel(
+                f"[info]Active Endpoint[/]:  {current_endpoint or '[dim]not set[/]'}\n"
+                f"[info]Saved Model IP[/]:   {saved_ip or '[dim]none[/]'}\n\n"
+                "[dim]Usage: /ip_m <new_ip>[/]\n"
+                "[dim]Example: /ip_m 35.223.143.247[/]\n"
+                "[dim]Example: /ip_m 35.223.143.247:8003[/]",
+                title="[bold]Model IP Configuration[/]",
+                border_style="red",
+            ))
+            return
+
+        # Parse IP input
+        raw_input = args[0].strip()
+
+        # Strip protocol prefix if user accidentally adds it
+        for prefix in ("http://", "https://"):
+            if raw_input.startswith(prefix):
+                raw_input = raw_input[len(prefix):]
+
+        # Split IP and port
+        if ":" in raw_input:
+            ip_part, port_part = raw_input.rsplit(":", 1)
+        else:
+            ip_part = raw_input
+            port_part = default_port
+
+        # Build the full endpoint URL
+        new_url = f"http://{ip_part}:{port_part}"
+
+        # Persist the IP for next session
+        ip_file.parent.mkdir(parents=True, exist_ok=True)
+        ip_file.write_text(f"{ip_part}:{port_part}")
+
+        # Update environment
+        os.environ["REDCLAW_LLM_URL"] = new_url
+
+        # Also update the link.txt so /link stays in sync
+        link_file = Path.home() / ".redclaw" / "link.txt"
+        link_file.write_text(new_url)
+
+        # Hot-reload runtime
+        if self._runtime:
+            self._runtime._config.llm_endpoint = new_url
+            try:
+                import asyncio
+                health = asyncio.run(self._runtime.initialize())
+                reachable = health.get("status") == "ready"
+                if reachable:
+                    self._console.print(
+                        f"[success]✅ Model IP updated and connected:[/]\n"
+                        f"   [info]IP: {ip_part}[/]\n"
+                        f"   [info]Port: {port_part}[/]\n"
+                        f"   [info]Endpoint: {new_url}[/]\n"
+                        f"   [success]🟢 Model reachable![/]"
+                    )
+                else:
+                    self._console.print(
+                        f"[warning]⚠️  Model IP updated but unreachable:[/]\n"
+                        f"   [info]{new_url}[/]\n"
+                        f"   [warning]🟡 Is the model running? Check GCP VM.[/]"
+                    )
+            except Exception:
+                self._console.print(
+                    f"[success]✅ Model IP updated:[/]\n"
+                    f"   [info]{new_url}[/]\n"
+                    f"   [dim]Saved to {ip_file}[/]"
+                )
+        else:
+            self._console.print(
+                f"[success]✅ Model IP updated:[/]\n"
+                f"   [info]{new_url}[/]\n"
+                f"   [dim]Saved to {ip_file}[/]"
+            )
+
     def _cmd_clear(self, args: list[str]) -> None:
         self._console.clear()
         self._console.print(BANNER)
@@ -797,6 +895,19 @@ def _build_runtime():
         saved_url = link_file.read_text().strip()
         if saved_url:
             os.environ.setdefault("REDCLAW_LLM_URL", saved_url)
+
+    # ── Load saved model IP from ~/.redclaw/model_ip.txt if exists ────────
+    # /ip_m command saves IP:port here; this takes priority over link.txt
+    ip_file = Path.home() / ".redclaw" / "model_ip.txt"
+    if ip_file.exists():
+        saved_ip = ip_file.read_text().strip()
+        if saved_ip:
+            # Build URL from saved IP (format: "35.x.x.x:8002")
+            if not saved_ip.startswith("http"):
+                saved_ip_url = f"http://{saved_ip}"
+            else:
+                saved_ip_url = saved_ip
+            os.environ["REDCLAW_LLM_URL"] = saved_ip_url
 
     # Config from environment or defaults — now defaults to GCP Qwen endpoint
     config = RuntimeConfig(
