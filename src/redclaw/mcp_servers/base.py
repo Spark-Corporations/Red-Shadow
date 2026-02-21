@@ -131,10 +131,32 @@ class BaseMCPServer(ABC):
                 success = result.success
                 error = result.stderr if not success else None
             else:
-                # No session manager — dry run mode
-                raw_output = f"[DRY RUN] Would execute: {command}"
-                success = True
-                error = None
+                # No session manager — execute directly via subprocess
+                try:
+                    proc = await asyncio.create_subprocess_shell(
+                        command,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                    )
+                    stdout_data, stderr_data = await asyncio.wait_for(
+                        proc.communicate(), timeout=timeout
+                    )
+                    raw_output = stdout_data.decode("utf-8", errors="replace")
+                    err_output = stderr_data.decode("utf-8", errors="replace")
+                    success = proc.returncode == 0
+                    error = err_output if (not success and err_output) else None
+
+                    if err_output and not success:
+                        raw_output = f"{raw_output}\n[STDERR]:\n{err_output}"
+
+                except asyncio.TimeoutError:
+                    raw_output = ""
+                    success = False
+                    error = f"Command timed out after {timeout}s"
+                except Exception as e:
+                    raw_output = ""
+                    success = False
+                    error = f"Execution error: {type(e).__name__}: {e}"
 
             # Parse output
             parsed = {}

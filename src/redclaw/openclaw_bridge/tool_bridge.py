@@ -158,6 +158,7 @@ class ToolBridge:
                     command=command,
                     target=target,
                     options=options,
+                    tool_name=raw_name,
                 )
             elif hasattr(server, "execute"):
                 output = server.execute(command=command, target=target, **options)
