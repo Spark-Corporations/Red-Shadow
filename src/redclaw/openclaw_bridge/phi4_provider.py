@@ -286,6 +286,33 @@ class Phi4Provider:
 
                     raise RuntimeError(f"HTTP 400: {error_text[:200]}")
 
+                if resp.status == 404:
+                    error_text = await resp.text()
+                    error_lower = error_text.lower()
+
+                    # OpenRouter: model doesn't support tool use → prompt-based fallback
+                    if use_native_tools and ("tool use" in error_lower or "endpoints" in error_lower):
+                        logger.info(
+                            "Model doesn't support native tool use (HTTP 404), "
+                            "switching to prompt-based mode"
+                        )
+                        return await self._call_provider_prompt_tools(
+                            provider, messages, tools, headers, url, start
+                        )
+
+                    # OpenRouter: data policy issue → retry without tools, log hint
+                    if "data policy" in error_lower:
+                        logger.warning(
+                            "OpenRouter data policy error — configure at "
+                            "https://openrouter.ai/settings/privacy"
+                        )
+                        if use_native_tools:
+                            return await self._call_provider_prompt_tools(
+                                provider, messages, tools, headers, url, start
+                            )
+
+                    raise RuntimeError(f"HTTP 404: {error_text[:200]}")
+
                 if resp.status != 200:
                     text = await resp.text()
                     raise RuntimeError(f"HTTP {resp.status}: {text[:200]}")
