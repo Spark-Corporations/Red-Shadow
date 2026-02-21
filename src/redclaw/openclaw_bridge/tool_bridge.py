@@ -55,6 +55,7 @@ class ToolBridge:
 
     def __init__(self, guardian=None):
         self._servers: dict[str, Any] = {}  # name → MCP server instance
+        self._tool_to_server: dict[str, str] = {}  # tool schema name → server name
         self._guardian = guardian  # GuardianRails for command validation
         self._execution_log: list[ToolCallResult] = []
         logger.info("ToolBridge initialized")
@@ -62,6 +63,14 @@ class ToolBridge:
     def register_server(self, name: str, server: Any) -> None:
         """Register an MCP server for tool execution."""
         self._servers[name] = server
+
+        # Build tool-schema-name → server-name mapping
+        if hasattr(server, "get_tools"):
+            for schema in server.get_tools():
+                tool_name = schema.name if hasattr(schema, "name") else str(schema)
+                self._tool_to_server[tool_name] = name
+                logger.debug(f"  Tool '{tool_name}' → server '{name}'")
+
         logger.info(f"Registered MCP server: {name}")
 
     def register_servers(self, servers: dict[str, Any]) -> None:
@@ -87,19 +96,32 @@ class ToolBridge:
         """
         start = time.monotonic()
 
-        # Extract base tool name
-        tool_name = request.name.replace("redclaw_", "")
+        # Resolve tool name → server name
+        #  1. Try direct tool-schema-name mapping (e.g. "nmap_scan" → "nmap")
+        #  2. Strip "redclaw_" prefix and try again
+        #  3. Fall back to raw name as server lookup
+        raw_name = request.name
+        tool_name = raw_name.replace("redclaw_", "")
+
+        # Resolve via tool-to-server map
+        server_name = (
+            self._tool_to_server.get(raw_name)
+            or self._tool_to_server.get(tool_name)
+            or tool_name  # fallback: assume tool_name == server_name
+        )
 
         # Find the server
-        server = self._servers.get(tool_name)
+        server = self._servers.get(server_name)
         if not server:
             result = ToolCallResult(
                 id=request.id,
                 name=request.name,
                 success=False,
                 output="",
-                error=f"No MCP server registered for tool: {tool_name}. "
-                      f"Available: {self.available_tools}",
+                error=f"No MCP server registered for tool: {raw_name} "
+                      f"(resolved: {server_name}). "
+                      f"Available servers: {self.available_tools}. "
+                      f"Known tools: {list(self._tool_to_server.keys())}",
             )
             self._execution_log.append(result)
             return result

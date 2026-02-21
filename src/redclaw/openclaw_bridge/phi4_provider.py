@@ -393,8 +393,12 @@ class Phi4Provider:
             })
 
         # Send without API tools — use adaptive max_tokens
-        # Cap output tokens to avoid exceeding model context limit
-        adaptive_max = min(provider.max_tokens, 1536)
+        # Dynamically cap to leave room for input tokens within context window
+        # Context limit is typically 4096 for Qwen on current vLLM config
+        context_limit = 4096
+        safety_margin = 64
+        # Start conservative: leave ~40% for output, but never exceed 1024
+        adaptive_max = min(provider.max_tokens, 1024)
         payload = {
             "model": provider.model,
             "messages": modified_messages,
@@ -403,15 +407,52 @@ class Phi4Provider:
             "stream": False,
         }
 
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                url, json=payload, headers=headers,
-                timeout=aiohttp.ClientTimeout(total=provider.timeout)
-            ) as resp:
-                if resp.status != 200:
-                    text = await resp.text()
-                    raise RuntimeError(f"HTTP {resp.status} (prompt-tools): {text[:200]}")
-                data = await resp.json()
+        # Inner retry: if 400 due to max_tokens, parse input count and recompute
+        max_retries = 2
+        data = None
+        for attempt in range(max_retries):
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    url, json=payload, headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=provider.timeout)
+                ) as resp:
+                    if resp.status == 400:
+                        error_text = await resp.text()
+                        error_lower = error_text.lower()
+                        if "max_tokens" in error_lower or "max_completion_tokens" in error_lower:
+                            # Parse input token count from error message
+                            import re as _re
+                            input_match = _re.search(r'(\d+)\s*input\s*tokens', error_text)
+                            if input_match:
+                                input_tokens = int(input_match.group(1))
+                                new_max = context_limit - input_tokens - safety_margin
+                                new_max = max(new_max, 256)  # floor
+                                logger.info(
+                                    f"max_tokens adaptive retry: input={input_tokens}, "
+                                    f"context={context_limit}, new_max={new_max}"
+                                )
+                                payload["max_tokens"] = new_max
+                                continue  # retry with corrected value
+                            else:
+                                # Can't parse — halve current value
+                                new_max = max(payload["max_tokens"] // 2, 256)
+                                logger.info(
+                                    f"max_tokens halved: {payload['max_tokens']} → {new_max}"
+                                )
+                                payload["max_tokens"] = new_max
+                                continue
+                        raise RuntimeError(f"HTTP 400 (prompt-tools): {error_text[:200]}")
+                    if resp.status != 200:
+                        text = await resp.text()
+                        raise RuntimeError(f"HTTP {resp.status} (prompt-tools): {text[:200]}")
+                    data = await resp.json()
+                    break  # success
+
+        if data is None:
+            raise RuntimeError(
+                f"prompt-tools failed after {max_retries} retries: "
+                f"max_tokens could not fit within context window"
+            )
 
         latency = time.monotonic() - start
         choice = data.get("choices", [{}])[0]
