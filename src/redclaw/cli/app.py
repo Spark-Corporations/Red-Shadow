@@ -96,6 +96,7 @@ SLASH_COMMANDS = {
     "/setup-tools": "Auto-install missing pentesting tools",
     "/link": "View/update ngrok LLM backend URL",
     "/ip_m": "Update model IP when GCP restarts (e.g. /ip_m 35.223.143.247)",
+    "/model": "Switch active model: /model qwen | /model phi",
     "/clear": "Clear the terminal",
     "/quit": "Exit RedClaw",
 }
@@ -200,6 +201,7 @@ class RedClawCLI:
             "/setup-tools": self._cmd_setup_tools,
             "/link": self._cmd_link,
             "/ip_m": self._cmd_ip_m,
+            "/model": self._cmd_model,
             "/clear": self._cmd_clear,
             "/quit": self._cmd_quit,
         }
@@ -730,6 +732,143 @@ class RedClawCLI:
                 f"   [dim]Saved to {ip_file}[/]"
             )
 
+    def _cmd_model(self, args: list[str]) -> None:
+        """Switch between model backends: qwen (GCP IP) or phi (ngrok tunnel).
+
+        Usage:
+            /model          → show current active model
+            /model qwen     → switch to Qwen2.5-Coder-32B (uses /ip_m address)
+            /model phi      → switch to Phi-4 (uses /link ngrok URL)
+        """
+        model_file = Path.home() / ".redclaw" / "active_model.txt"
+        ip_file = Path.home() / ".redclaw" / "model_ip.txt"
+        link_file = Path.home() / ".redclaw" / "link.txt"
+
+        # ── Model profiles ──
+        profiles = {
+            "qwen": {
+                "display": "Qwen2.5-Coder-32B",
+                "model_name": "qwen-coder",
+                "source": "GCP Compute Engine (IP)",
+                "icon": "🟢",
+            },
+            "phi": {
+                "display": "Phi-4",
+                "model_name": "phi-4",
+                "source": "Kaggle (ngrok tunnel)",
+                "icon": "🔵",
+            },
+        }
+
+        if not args:
+            # Show current model
+            active = "qwen"  # default
+            if model_file.exists():
+                active = model_file.read_text().strip().lower()
+
+            profile = profiles.get(active, profiles["qwen"])
+
+            # Show saved endpoints
+            saved_ip = ip_file.read_text().strip() if ip_file.exists() else None
+            saved_link = link_file.read_text().strip() if link_file.exists() else None
+            current_endpoint = None
+            if self._runtime:
+                status = self._runtime.get_status()
+                current_endpoint = status.get("llm_endpoint")
+
+            lines = [
+                f"[info]Active Model[/]:   {profile['icon']} {profile['display']}",
+                f"[info]Model Name[/]:     {profile['model_name']}",
+                f"[info]Source[/]:          {profile['source']}",
+                f"[info]Endpoint[/]:        {current_endpoint or '[dim]not set[/]'}",
+                "",
+                f"[dim]Qwen IP[/]:    {saved_ip or '[dim]not set — use /ip_m[/]'}",
+                f"[dim]Phi URL[/]:    {saved_link or '[dim]not set — use /link[/]'}",
+                "",
+                "[dim]Switch: /model qwen | /model phi[/]",
+            ]
+
+            self._console.print(Panel(
+                "\n".join(lines),
+                title="[bold]Model Configuration[/]",
+                border_style="red",
+            ))
+            return
+
+        # ── Switch model ──
+        choice = args[0].strip().lower()
+
+        if choice not in profiles:
+            self._console.print(
+                f"[error]Unknown model: '{choice}'. Available: qwen, phi[/]"
+            )
+            return
+
+        profile = profiles[choice]
+
+        # Determine endpoint based on model choice
+        if choice == "qwen":
+            # Use saved IP or default
+            if ip_file.exists():
+                saved_ip = ip_file.read_text().strip()
+                new_url = f"http://{saved_ip}" if not saved_ip.startswith("http") else saved_ip
+            else:
+                new_url = "http://35.223.143.247:8002"
+                self._console.print(
+                    "[dim]No saved IP. Using default. Set with /ip_m <ip>[/]"
+                )
+        else:  # phi
+            if link_file.exists():
+                new_url = link_file.read_text().strip()
+            else:
+                new_url = "https://placeholder.ngrok-free.app"
+                self._console.print(
+                    "[warning]⚠️ No ngrok URL saved. Set with /link <url>[/]"
+                )
+
+        model_name = profile["model_name"]
+
+        # Save active model choice
+        model_file.parent.mkdir(parents=True, exist_ok=True)
+        model_file.write_text(choice)
+
+        # Update environment
+        os.environ["REDCLAW_LLM_URL"] = new_url
+        os.environ["REDCLAW_LLM_MODEL"] = model_name
+
+        # Hot-reload runtime
+        if self._runtime:
+            self._runtime._config.llm_endpoint = new_url
+            self._runtime._config.llm_model = model_name
+            try:
+                import asyncio
+                health = asyncio.run(self._runtime.initialize())
+                reachable = health.get("status") == "ready"
+                if reachable:
+                    self._console.print(
+                        f"[success]✅ Switched to {profile['icon']} {profile['display']}:[/]\n"
+                        f"   [info]Model: {model_name}[/]\n"
+                        f"   [info]Endpoint: {new_url}[/]\n"
+                        f"   [success]🟢 Connected![/]"
+                    )
+                else:
+                    self._console.print(
+                        f"[warning]⚠️  Switched to {profile['display']} but unreachable:[/]\n"
+                        f"   [info]{new_url}[/]\n"
+                        f"   [warning]🟡 Check {'GCP VM' if choice == 'qwen' else 'ngrok tunnel'}[/]"
+                    )
+            except Exception:
+                self._console.print(
+                    f"[success]✅ Switched to {profile['display']}:[/]\n"
+                    f"   [info]Endpoint: {new_url}[/]"
+                )
+        else:
+            self._console.print(
+                f"[success]✅ Model set to {profile['display']}:[/]\n"
+                f"   [info]{new_url}[/]\n"
+                f"   [dim]Will take effect on next task[/]"
+            )
+
     def _cmd_clear(self, args: list[str]) -> None:
         self._console.clear()
         self._console.print(BANNER)
@@ -888,34 +1027,48 @@ def _build_runtime():
     from ..mcp_servers.agent_control_server import AgentControlServer
     from ..mcp_servers.file_server import FileServer
 
-    # ── Load saved URL from ~/.redclaw/link.txt if exists ──────────────────
+    # ── Load active model profile from ~/.redclaw/active_model.txt ──────────
+    # /model command saves "qwen" or "phi" here
+    model_file = Path.home() / ".redclaw" / "active_model.txt"
+    active_model = "qwen"  # default
+    if model_file.exists():
+        active_model = model_file.read_text().strip().lower()
+
+    # ── Resolve endpoint based on active model ────────────────────────────
     link_file = Path.home() / ".redclaw" / "link.txt"
-    saved_url = None
-    if link_file.exists():
-        saved_url = link_file.read_text().strip()
-        if saved_url:
-            os.environ.setdefault("REDCLAW_LLM_URL", saved_url)
-
-    # ── Load saved model IP from ~/.redclaw/model_ip.txt if exists ────────
-    # /ip_m command saves IP:port here; this takes priority over link.txt
     ip_file = Path.home() / ".redclaw" / "model_ip.txt"
-    if ip_file.exists():
-        saved_ip = ip_file.read_text().strip()
-        if saved_ip:
-            # Build URL from saved IP (format: "35.x.x.x:8002")
-            if not saved_ip.startswith("http"):
-                saved_ip_url = f"http://{saved_ip}"
-            else:
-                saved_ip_url = saved_ip
-            os.environ["REDCLAW_LLM_URL"] = saved_ip_url
 
-    # Config from environment or defaults — now defaults to GCP Qwen endpoint
+    if active_model == "phi":
+        # Phi-4 mode: use ngrok URL from link.txt
+        model_name = "phi-4"
+        default_url = "https://placeholder.ngrok-free.app"
+        if link_file.exists():
+            saved = link_file.read_text().strip()
+            if saved:
+                default_url = saved
+        os.environ.setdefault("REDCLAW_LLM_URL", default_url)
+        os.environ.setdefault("REDCLAW_LLM_MODEL", model_name)
+    else:
+        # Qwen mode (default): use GCP IP from model_ip.txt
+        model_name = "qwen-coder"
+        default_url = "http://35.223.143.247:8002"
+        # First try link.txt as base
+        if link_file.exists():
+            saved = link_file.read_text().strip()
+            if saved:
+                default_url = saved
+        # model_ip.txt takes priority over link.txt for qwen
+        if ip_file.exists():
+            saved_ip = ip_file.read_text().strip()
+            if saved_ip:
+                default_url = f"http://{saved_ip}" if not saved_ip.startswith("http") else saved_ip
+        os.environ.setdefault("REDCLAW_LLM_URL", default_url)
+        os.environ.setdefault("REDCLAW_LLM_MODEL", model_name)
+
+    # Config from environment or defaults
     config = RuntimeConfig(
-        llm_endpoint=os.environ.get(
-            "REDCLAW_LLM_URL",
-            "http://35.223.143.247:8002"
-        ),
-        llm_model=os.environ.get("REDCLAW_LLM_MODEL", "qwen-coder"),
+        llm_endpoint=os.environ.get("REDCLAW_LLM_URL", default_url),
+        llm_model=os.environ.get("REDCLAW_LLM_MODEL", model_name),
         llm_api_key=os.environ.get("REDCLAW_LLM_KEY"),
     )
 

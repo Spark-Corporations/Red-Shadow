@@ -261,16 +261,34 @@ class Phi4Provider:
                 url, json=payload, headers=headers,
                 timeout=aiohttp.ClientTimeout(total=provider.timeout)
             ) as resp:
-                if resp.status == 400 and use_native_tools:
-                    # Native tool-calling not supported — fall back to prompt-based
+                if resp.status == 400:
                     error_text = await resp.text()
-                    if "tool" in error_text.lower() or "auto" in error_text.lower():
+                    error_lower = error_text.lower()
+
+                    # Case 1: Native tool-calling not supported → prompt-based fallback
+                    if use_native_tools and ("tool" in error_lower or "auto" in error_lower):
                         logger.info(
                             "Native tool-calling not available, switching to prompt-based mode"
                         )
                         return await self._call_provider_prompt_tools(
                             provider, messages, tools, headers, url, start
                         )
+
+                    # Case 2: max_tokens too large → retry with adaptive value
+                    if "max_tokens" in error_lower or "max_completion_tokens" in error_lower:
+                        # Halve max_tokens and retry
+                        adaptive_max = max(provider.max_tokens // 2, 512)
+                        logger.info(
+                            f"max_tokens too large ({provider.max_tokens}), "
+                            f"retrying with {adaptive_max}"
+                        )
+                        payload["max_tokens"] = adaptive_max
+                        if use_native_tools:
+                            # Also try without tools to reduce input size
+                            return await self._call_provider_prompt_tools(
+                                provider, messages, tools, headers, url, start
+                            )
+
                     raise RuntimeError(f"HTTP 400: {error_text[:200]}")
 
                 if resp.status != 200:
@@ -374,11 +392,13 @@ class Phi4Provider:
                 "content": tool_instruction,
             })
 
-        # Send without API tools
+        # Send without API tools — use adaptive max_tokens
+        # Cap output tokens to avoid exceeding model context limit
+        adaptive_max = min(provider.max_tokens, 1536)
         payload = {
             "model": provider.model,
             "messages": modified_messages,
-            "max_tokens": provider.max_tokens,
+            "max_tokens": adaptive_max,
             "temperature": provider.temperature,
             "stream": False,
         }
