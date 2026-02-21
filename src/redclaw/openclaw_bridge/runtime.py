@@ -47,18 +47,18 @@ class AgentMessage:
 @dataclass
 class RuntimeConfig:
     """Configuration for the OpenClaw runtime."""
-    # LLM settings — Qwen2.5-Coder-32B on GCP Compute Engine
+    # LLM settings — defaults to Gemini API (OpenAI-compatible)
     llm_endpoint: str = os.environ.get(
         "REDCLAW_LLM_URL",
-        "http://35.223.143.247:8002"
+        "https://generativelanguage.googleapis.com/v1beta/openai"
     )
-    llm_model: str = os.environ.get("REDCLAW_LLM_MODEL", "qwen-coder")
-    llm_api_key: Optional[str] = os.environ.get("REDCLAW_LLM_KEY")
+    llm_model: str = os.environ.get("REDCLAW_LLM_MODEL", "gemini-2.5-flash")
+    llm_api_key: Optional[str] = None  # loaded in __post_init__
     ollama_endpoint: str = "http://localhost:11434/v1"
 
     # Agent settings
     max_iterations: int = 30          # Max LLM↔tool cycles per task
-    max_tokens: int = 8192            # Max tokens per LLM response (Qwen supports 32K+)
+    max_tokens: int = 8192            # Max tokens per LLM response
     temperature: float = 0.1          # Low temp for deterministic pentesting
     timeout: int = 600                # Total task timeout (seconds)
     tool_timeout: int = 300           # Per-tool execution timeout
@@ -67,6 +67,15 @@ class RuntimeConfig:
     # Features
     streaming: bool = False           # Stream LLM output token-by-token
     verbose: bool = True              # Yield intermediate steps
+
+    def __post_init__(self):
+        """Load API key: env var → ~/.redclaw/api_key.txt"""
+        if self.llm_api_key is None:
+            self.llm_api_key = os.environ.get("REDCLAW_LLM_KEY")
+        if self.llm_api_key is None:
+            key_file = Path.home() / ".redclaw" / "api_key.txt"
+            if key_file.exists():
+                self.llm_api_key = key_file.read_text().strip() or None
 
 
 # ── Main Runtime ──────────────────────────────────────────────────────────────
@@ -125,10 +134,10 @@ class OpenClawRuntime:
         # Create provider — normalize URL to avoid double-slash
         endpoint = self._config.llm_endpoint.rstrip("/")
         self._provider = Phi4Provider(
-            kaggle_endpoint=endpoint + "/v1"
-            if not endpoint.endswith("/v1")
+            primary_endpoint=endpoint + "/v1"
+            if not endpoint.endswith(("/v1", "/openai"))
             else endpoint,
-            kaggle_api_key=self._config.llm_api_key,
+            api_key=self._config.llm_api_key,
             ollama_endpoint=self._config.ollama_endpoint,
             model=self._config.llm_model,
             max_tokens=self._config.max_tokens,

@@ -49,22 +49,17 @@ class ProviderConfig:
 
 class Phi4Provider:
     """
-    Kaggle Phi-4 LLM provider with fallback support.
+    LLM provider with fallback support for any OpenAI-compatible API.
 
-    Priority:
-      1. Kaggle endpoint (ngrok tunnel from notebook)
-      2. Ollama local (if configured)
-      3. Any OpenAI-compatible endpoint
+    Supports: Gemini, OpenAI, Groq, OpenRouter, Ollama, vLLM, etc.
+    Priority: primary API endpoint → Ollama fallback.
 
     Usage:
         provider = Phi4Provider(
-            kaggle_endpoint="https://xxxx.ngrok.io/v1",
-            ollama_endpoint="http://localhost:11434/v1",
+            primary_endpoint="https://generativelanguage.googleapis.com/v1beta/openai",
+            api_key="AIza...",
+            model="gemini-2.5-flash",
         )
-        response = await provider.chat(messages=[
-            {"role": "system", "content": "You are a pentester."},
-            {"role": "user", "content": "Scan port 80."},
-        ])
     """
 
     @staticmethod
@@ -80,10 +75,10 @@ class Phi4Provider:
 
     def __init__(
         self,
-        kaggle_endpoint: str = "http://localhost:5000/v1",
-        kaggle_api_key: Optional[str] = None,
+        primary_endpoint: str = "https://generativelanguage.googleapis.com/v1beta/openai",
+        api_key: Optional[str] = None,
         ollama_endpoint: str = "http://localhost:11434/v1",
-        model: str = "phi-4",
+        model: str = "gemini-2.5-flash",
         max_tokens: int = 8192,
         temperature: float = 0.1,
         timeout: int = 120,
@@ -91,13 +86,13 @@ class Phi4Provider:
     ):
         self._providers: list[ProviderConfig] = []
 
-        # Primary: Kaggle Phi-4
-        kaggle_ep = self._normalize_endpoint(kaggle_endpoint)
+        # Primary: API provider (Gemini, OpenAI, Groq, etc.)
+        primary_ep = self._normalize_endpoint(primary_endpoint)
         self._providers.append(ProviderConfig(
-            name="kaggle_phi4",
-            endpoint=kaggle_ep,
+            name="api_provider",
+            endpoint=primary_ep,
             model=model,
-            api_key=kaggle_api_key,
+            api_key=api_key,
             max_tokens=max_tokens,
             temperature=temperature,
             timeout=timeout,
@@ -390,8 +385,8 @@ class Phi4Provider:
 
         # Send without API tools — use adaptive max_tokens
         # Dynamically cap to leave room for input tokens within context window
-        # Context limit — use 8192 for Qwen2.5-Coder; adaptive retry handles if server caps lower
-        context_limit = 8192
+        # Context limit — generous for Gemini (1M context), adaptive retry handles if server caps lower
+        context_limit = 131072
         safety_margin = 64
         # Start conservative: leave ~40% for output, but never exceed 1024
         adaptive_max = min(provider.max_tokens, 1024)

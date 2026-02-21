@@ -94,9 +94,10 @@ SLASH_COMMANDS = {
     "/skin": "Launch Claude Code with RedClaw pentesting skin",
     "/doctor": "Health-check all tool dependencies",
     "/setup-tools": "Auto-install missing pentesting tools",
-    "/link": "View/update ngrok LLM backend URL",
+    "/link": "View/update LLM backend endpoint URL",
+    "/apikey": "Set or view API key for LLM provider (Gemini, OpenAI, etc.)",
     "/ip_m": "Update model IP when GCP restarts (e.g. /ip_m 35.223.143.247)",
-    "/model": "Switch active model: /model qwen | /model phi",
+    "/model": "Switch active model: /model gemini | /model openai | /model groq",
     "/clear": "Clear the terminal",
     "/quit": "Exit RedClaw",
 }
@@ -200,6 +201,7 @@ class RedClawCLI:
             "/doctor": self._cmd_doctor,
             "/setup-tools": self._cmd_setup_tools,
             "/link": self._cmd_link,
+            "/apikey": self._cmd_apikey,
             "/ip_m": self._cmd_ip_m,
             "/model": self._cmd_model,
             "/clear": self._cmd_clear,
@@ -636,6 +638,93 @@ class RedClawCLI:
                 f"   [dim]Saved to {link_file}[/]"
             )
 
+    def _cmd_apikey(self, args: list[str]) -> None:
+        """Set or view the API key for LLM provider.
+
+        Usage:
+            /apikey              → show current API key (masked)
+            /apikey AIza...      → save new API key
+            /apikey clear        → remove saved API key
+        """
+        key_file = Path.home() / ".redclaw" / "api_key.txt"
+
+        if not args:
+            # Show current key
+            env_key = os.environ.get("REDCLAW_LLM_KEY")
+            file_key = key_file.read_text().strip() if key_file.exists() else None
+            active_key = env_key or file_key
+
+            if active_key:
+                # Mask: show first 4 and last 4 chars
+                if len(active_key) > 12:
+                    masked = active_key[:4] + "..." + active_key[-4:]
+                else:
+                    masked = active_key[:4] + "..."
+                source = "env REDCLAW_LLM_KEY" if env_key else f"{key_file}"
+                self._console.print(Panel(
+                    f"[info]API Key[/]:    {masked}\n"
+                    f"[info]Source[/]:     {source}",
+                    title="[bold]API Key[/]",
+                    border_style="red",
+                ))
+            else:
+                self._console.print(Panel(
+                    "[warning]No API key configured.[/]\n\n"
+                    "[dim]Usage: /apikey <your-api-key>[/]\n"
+                    "[dim]Get a Gemini key: https://aistudio.google.com/apikey[/]",
+                    title="[bold]API Key[/]",
+                    border_style="red",
+                ))
+            return
+
+        new_key = args[0].strip()
+
+        # Handle clear
+        if new_key.lower() == "clear":
+            if key_file.exists():
+                key_file.unlink()
+            if "REDCLAW_LLM_KEY" in os.environ:
+                del os.environ["REDCLAW_LLM_KEY"]
+            self._console.print("[success]✅ API key cleared.[/]")
+            return
+
+        # Save new key
+        key_file.parent.mkdir(parents=True, exist_ok=True)
+        key_file.write_text(new_key)
+        os.environ["REDCLAW_LLM_KEY"] = new_key
+
+        # Hot-reload runtime with new key
+        if self._runtime:
+            self._runtime._config.llm_api_key = new_key
+            try:
+                import asyncio
+                health = asyncio.run(self._runtime.initialize())
+                reachable = health.get("status") == "ready"
+                if reachable:
+                    masked = new_key[:4] + "..." + new_key[-4:] if len(new_key) > 12 else new_key[:4] + "..."
+                    self._console.print(
+                        f"[success]✅ API key saved & connected:[/]\n"
+                        f"   [info]Key: {masked}[/]\n"
+                        f"   [success]🟢 LLM reachable![/]"
+                    )
+                else:
+                    self._console.print(
+                        f"[warning]⚠️  API key saved but LLM unreachable.[/]\n"
+                        f"   [dim]Check: /model, /agent[/]"
+                    )
+            except Exception as e:
+                self._console.print(
+                    f"[success]✅ API key saved.[/]\n"
+                    f"   [dim]Saved to {key_file}[/]"
+                )
+        else:
+            masked = new_key[:4] + "..." + new_key[-4:] if len(new_key) > 12 else new_key[:4] + "..."
+            self._console.print(
+                f"[success]✅ API key saved:[/]\n"
+                f"   [info]Key: {masked}[/]\n"
+                f"   [dim]Saved to {key_file}[/]"
+            )
+
     def _cmd_ip_m(self, args: list[str]) -> None:
         """Update the model's IP address when GCP instance restarts.
 
@@ -733,12 +822,16 @@ class RedClawCLI:
             )
 
     def _cmd_model(self, args: list[str]) -> None:
-        """Switch between model backends: qwen (GCP IP) or phi (ngrok tunnel).
+        """Switch between model backends.
 
         Usage:
             /model          → show current active model
-            /model qwen     → switch to Qwen2.5-Coder-32B (uses /ip_m address)
-            /model phi      → switch to Phi-4 (uses /link ngrok URL)
+            /model gemini   → Gemini 2.5 Flash via Google AI API
+            /model openai   → GPT-4o-mini via OpenAI API  
+            /model groq     → Llama 3.3 70B via Groq API
+            /model openrouter → Qwen 2.5 Coder via OpenRouter
+            /model qwen     → (legacy) self-hosted Qwen via GCP IP
+            /model phi      → (legacy) self-hosted Phi-4 via ngrok
         """
         model_file = Path.home() / ".redclaw" / "active_model.txt"
         ip_file = Path.home() / ".redclaw" / "model_ip.txt"
@@ -746,46 +839,83 @@ class RedClawCLI:
 
         # ── Model profiles ──
         profiles = {
+            "gemini": {
+                "display": "Gemini 2.5 Flash",
+                "model_name": "gemini-2.5-flash",
+                "endpoint": "https://generativelanguage.googleapis.com/v1beta/openai",
+                "source": "Google AI API",
+                "icon": "🔵",
+                "needs_key": True,
+            },
+            "openai": {
+                "display": "GPT-4o-mini",
+                "model_name": "gpt-4o-mini",
+                "endpoint": "https://api.openai.com/v1",
+                "source": "OpenAI API",
+                "icon": "🟢",
+                "needs_key": True,
+            },
+            "groq": {
+                "display": "Llama 3.3 70B",
+                "model_name": "llama-3.3-70b-versatile",
+                "endpoint": "https://api.groq.com/openai/v1",
+                "source": "Groq API",
+                "icon": "🟠",
+                "needs_key": True,
+            },
+            "openrouter": {
+                "display": "Qwen 2.5 Coder 32B",
+                "model_name": "qwen/qwen-2.5-coder-32b-instruct",
+                "endpoint": "https://openrouter.ai/api/v1",
+                "source": "OpenRouter API",
+                "icon": "🟣",
+                "needs_key": True,
+            },
             "qwen": {
-                "display": "Qwen2.5-Coder-32B",
+                "display": "Qwen2.5-Coder-32B (self-hosted)",
                 "model_name": "qwen-coder",
                 "source": "GCP Compute Engine (IP)",
-                "icon": "🟢",
+                "icon": "⚪",
+                "needs_key": False,
             },
             "phi": {
-                "display": "Phi-4",
+                "display": "Phi-4 (self-hosted)",
                 "model_name": "phi-4",
                 "source": "Kaggle (ngrok tunnel)",
-                "icon": "🔵",
+                "icon": "⚪",
+                "needs_key": False,
             },
         }
 
         if not args:
             # Show current model
-            active = "qwen"  # default
+            active = "gemini"  # default
             if model_file.exists():
                 active = model_file.read_text().strip().lower()
 
-            profile = profiles.get(active, profiles["qwen"])
+            profile = profiles.get(active, profiles["gemini"])
 
             # Show saved endpoints
-            saved_ip = ip_file.read_text().strip() if ip_file.exists() else None
-            saved_link = link_file.read_text().strip() if link_file.exists() else None
             current_endpoint = None
             if self._runtime:
                 status = self._runtime.get_status()
                 current_endpoint = status.get("llm_endpoint")
 
+            # Check API key
+            key_file = Path.home() / ".redclaw" / "api_key.txt"
+            has_key = key_file.exists() and key_file.read_text().strip()
+
             lines = [
                 f"[info]Active Model[/]:   {profile['icon']} {profile['display']}",
                 f"[info]Model Name[/]:     {profile['model_name']}",
                 f"[info]Source[/]:          {profile['source']}",
-                f"[info]Endpoint[/]:        {current_endpoint or '[dim]not set[/]'}",
+                f"[info]Endpoint[/]:        {current_endpoint or profile.get('endpoint', '[dim]not set[/]')}",
+                f"[info]API Key[/]:         {'✅ Set' if has_key else '❌ Not set — use /apikey <key>'}",
                 "",
-                f"[dim]Qwen IP[/]:    {saved_ip or '[dim]not set — use /ip_m[/]'}",
-                f"[dim]Phi URL[/]:    {saved_link or '[dim]not set — use /link[/]'}",
+                "[dim]API Providers:[/]   gemini | openai | groq | openrouter",
+                "[dim]Self-hosted:[/]     qwen | phi",
                 "",
-                "[dim]Switch: /model qwen | /model phi[/]",
+                "[dim]Switch: /model <name>[/]",
             ]
 
             self._console.print(Panel(
@@ -799,16 +929,20 @@ class RedClawCLI:
         choice = args[0].strip().lower()
 
         if choice not in profiles:
+            available = ", ".join(profiles.keys())
             self._console.print(
-                f"[error]Unknown model: '{choice}'. Available: qwen, phi[/]"
+                f"[error]Unknown model: '{choice}'. Available: {available}[/]"
             )
             return
 
         profile = profiles[choice]
 
         # Determine endpoint based on model choice
-        if choice == "qwen":
-            # Use saved IP or default
+        if "endpoint" in profile:
+            # API provider — use built-in endpoint
+            new_url = profile["endpoint"]
+        elif choice == "qwen":
+            # Legacy: Use saved IP or default
             if ip_file.exists():
                 saved_ip = ip_file.read_text().strip()
                 new_url = f"http://{saved_ip}" if not saved_ip.startswith("http") else saved_ip
@@ -823,7 +957,19 @@ class RedClawCLI:
             else:
                 new_url = "https://placeholder.ngrok-free.app"
                 self._console.print(
-                    "[warning]⚠️ No ngrok URL saved. Set with /link <url>[/]"
+                    "[warning]⚠\ufe0f No ngrok URL saved. Set with /link <url>[/]"
+                )
+
+        # Warn if API key needed but not set
+        if profile.get("needs_key"):
+            key_file = Path.home() / ".redclaw" / "api_key.txt"
+            has_key = (
+                os.environ.get("REDCLAW_LLM_KEY")
+                or (key_file.exists() and key_file.read_text().strip())
+            )
+            if not has_key:
+                self._console.print(
+                    f"[warning]⚠\ufe0f {profile['display']} requires an API key. Set with /apikey <key>[/]"
                 )
 
         model_name = profile["model_name"]
@@ -1028,48 +1174,44 @@ def _build_runtime():
     from ..mcp_servers.file_server import FileServer
 
     # ── Load active model profile from ~/.redclaw/active_model.txt ──────────
-    # /model command saves "qwen" or "phi" here
     model_file = Path.home() / ".redclaw" / "active_model.txt"
-    active_model = "qwen"  # default
+    active_model = "gemini"  # default
     if model_file.exists():
         active_model = model_file.read_text().strip().lower()
 
-    # ── Resolve endpoint based on active model ────────────────────────────
-    link_file = Path.home() / ".redclaw" / "link.txt"
-    ip_file = Path.home() / ".redclaw" / "model_ip.txt"
+    # ── Provider endpoint table (mirrors /model profiles) ────────────────
+    provider_table = {
+        "gemini":     ("gemini-2.5-flash", "https://generativelanguage.googleapis.com/v1beta/openai"),
+        "openai":     ("gpt-4o-mini", "https://api.openai.com/v1"),
+        "groq":       ("llama-3.3-70b-versatile", "https://api.groq.com/openai/v1"),
+        "openrouter": ("qwen/qwen-2.5-coder-32b-instruct", "https://openrouter.ai/api/v1"),
+    }
 
-    if active_model == "phi":
-        # Phi-4 mode: use ngrok URL from link.txt
+    if active_model in provider_table:
+        model_name, default_url = provider_table[active_model]
+    elif active_model == "phi":
         model_name = "phi-4"
-        default_url = "https://placeholder.ngrok-free.app"
-        if link_file.exists():
-            saved = link_file.read_text().strip()
-            if saved:
-                default_url = saved
-        os.environ.setdefault("REDCLAW_LLM_URL", default_url)
-        os.environ.setdefault("REDCLAW_LLM_MODEL", model_name)
+        link_file = Path.home() / ".redclaw" / "link.txt"
+        default_url = link_file.read_text().strip() if link_file.exists() else "https://placeholder.ngrok-free.app"
     else:
-        # Qwen mode (default): use GCP IP from model_ip.txt
+        # Legacy qwen (self-hosted)
         model_name = "qwen-coder"
+        ip_file = Path.home() / ".redclaw" / "model_ip.txt"
+        link_file = Path.home() / ".redclaw" / "link.txt"
         default_url = "http://35.223.143.247:8002"
-        # First try link.txt as base
-        if link_file.exists():
-            saved = link_file.read_text().strip()
-            if saved:
-                default_url = saved
-        # model_ip.txt takes priority over link.txt for qwen
-        if ip_file.exists():
+        if link_file.exists() and link_file.read_text().strip():
+            default_url = link_file.read_text().strip()
+        if ip_file.exists() and ip_file.read_text().strip():
             saved_ip = ip_file.read_text().strip()
-            if saved_ip:
-                default_url = f"http://{saved_ip}" if not saved_ip.startswith("http") else saved_ip
-        os.environ.setdefault("REDCLAW_LLM_URL", default_url)
-        os.environ.setdefault("REDCLAW_LLM_MODEL", model_name)
+            default_url = f"http://{saved_ip}" if not saved_ip.startswith("http") else saved_ip
 
-    # Config from environment or defaults
+    os.environ.setdefault("REDCLAW_LLM_URL", default_url)
+    os.environ.setdefault("REDCLAW_LLM_MODEL", model_name)
+
+    # Config — API key auto-loaded from env/file by RuntimeConfig.__post_init__
     config = RuntimeConfig(
         llm_endpoint=os.environ.get("REDCLAW_LLM_URL", default_url),
         llm_model=os.environ.get("REDCLAW_LLM_MODEL", model_name),
-        llm_api_key=os.environ.get("REDCLAW_LLM_KEY"),
     )
 
     # Create guardian
