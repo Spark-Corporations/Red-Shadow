@@ -1,30 +1,29 @@
 """
 OpenRouterClient — Dual-Brain LLM client for RedClaw V3.1
 
-Connects to OpenRouter API with two model profiles:
-  - Brain (openai/gpt-oss-120b:free): Strategic reasoning, planning, analysis
-  - Hands (arcee-ai/trinity-large-preview:free): Code generation, exploit scripting, automation
+NOW delegates all API calls through LLMClient for:
+  - Rate limiting (token bucket per model)
+  - Automatic retries with exponential backoff + jitter
+  - Provider failover (OpenRouter → Gemini → Ollama)
+  - Context auto-compaction
+  - Cost tracking
+  - Message consistency (fix_message_list)
 
-Features:
-  - Rate limiting per model
-  - Automatic retries with exponential backoff
-  - Token usage tracking
-  - Streaming support
-  - Error classification and recovery
+High-level API remains identical:
+  - call_brain()   → gpt-oss-120B (strategic reasoning)
+  - call_hands()   → trinity-large (code generation)
+  - call_raw()     → full control
+  - dual_brain()   → Brain plans → Hands codes → Brain reviews
 """
 
 from __future__ import annotations
 
-import asyncio
-import json
 import logging
 import os
 import time
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, AsyncIterator, Optional
-
-import aiohttp
+from typing import Any, Optional
 
 logger = logging.getLogger("redclaw.router.openrouter_client")
 
@@ -61,45 +60,14 @@ class ModelProfile:
     description: str = ""
 
 
-# ── Rate Limiter ──────────────────────────────────────────────────────────────
-
-
-class RateLimiter:
-    """Token bucket rate limiter for API calls."""
-
-    def __init__(self, max_requests_per_minute: int):
-        self.max_rpm = max_requests_per_minute
-        self.tokens = max_requests_per_minute
-        self.last_refill = time.monotonic()
-        self._lock = asyncio.Lock()
-
-    async def acquire(self):
-        """Wait until a request slot is available."""
-        async with self._lock:
-            now = time.monotonic()
-            elapsed = now - self.last_refill
-
-            # Refill tokens based on elapsed time
-            refill = elapsed * (self.max_rpm / 60.0)
-            self.tokens = min(self.max_rpm, self.tokens + refill)
-            self.last_refill = now
-
-            if self.tokens < 1:
-                # Wait for next available slot
-                wait_time = (1 - self.tokens) / (self.max_rpm / 60.0)
-                logger.debug(f"Rate limited, waiting {wait_time:.2f}s")
-                await asyncio.sleep(wait_time)
-                self.tokens = 0
-            else:
-                self.tokens -= 1
-
-
 # ── OpenRouter Client ─────────────────────────────────────────────────────────
 
 
 class OpenRouterClient:
     """
     Dual-Brain LLM client using OpenRouter API.
+
+    Delegates all calls through LLMClient for enterprise reliability.
 
     Usage:
         client = OpenRouterClient(api_key="sk-or-...")
@@ -143,6 +111,7 @@ class OpenRouterClient:
         retry_count: int = 5,
         app_name: str = "RedClaw v3.1",
         app_url: str = "https://github.com/redclaw",
+        llm_client=None,
     ):
         # API key from param, env var, or config file
         self.api_key = api_key or os.getenv("OPENROUTER_API_KEY") or self._load_api_key()
@@ -155,13 +124,40 @@ class OpenRouterClient:
         self.app_name = app_name
         self.app_url = app_url
 
-        # Rate limiters per model
-        self._rate_limiters = {
-            self.BRAIN.model_id: RateLimiter(self.BRAIN.rate_limit_rpm),
-            self.HANDS.model_id: RateLimiter(self.HANDS.rate_limit_rpm),
-        }
+        # ── LLMClient integration (NEW) ──────────────────────────────────
+        # If an LLMClient is provided, delegate all calls through it for
+        # rate limiting, retry, failover, compaction, and cost tracking.
+        # If not, fall back to direct aiohttp calls (legacy behavior).
+        self._llm_client = llm_client
+        self._use_llm_client = llm_client is not None
 
-        # Usage tracking
+        if self._use_llm_client:
+            # Register Brain and Hands as providers in the LLMClient
+            from .llm_client import ProviderConfig
+
+            if self.api_key:
+                self._llm_client.add_provider(ProviderConfig(
+                    model=self.BRAIN.model_id,
+                    api_key=self.api_key,
+                    base_url="https://openrouter.ai/api/v1",
+                    priority=10,
+                    rpm_limit=self.BRAIN.rate_limit_rpm,
+                    description=f"OpenRouter Brain ({self.BRAIN.model_id})",
+                ))
+                self._llm_client.add_provider(ProviderConfig(
+                    model=self.HANDS.model_id,
+                    api_key=self.api_key,
+                    base_url="https://openrouter.ai/api/v1",
+                    priority=20,
+                    rpm_limit=self.HANDS.rate_limit_rpm,
+                    description=f"OpenRouter Hands ({self.HANDS.model_id})",
+                ))
+
+            logger.info("OpenRouterClient using LLMClient for reliability")
+        else:
+            logger.info("OpenRouterClient using legacy aiohttp (no LLMClient)")
+
+        # Usage tracking (maintained for backward compatibility)
         self._stats = {
             "brain_calls": 0,
             "hands_calls": 0,
@@ -190,7 +186,7 @@ class OpenRouterClient:
                     return key
         return None
 
-    # ── Core API Call ─────────────────────────────────────────────────────
+    # ── Core API Call (delegates to LLMClient when available) ─────────────
 
     async def _call_api(
         self,
@@ -204,38 +200,100 @@ class OpenRouterClient:
         """
         Make an API call to OpenRouter.
 
-        Args:
-            messages: Chat messages ([{"role": "user", "content": "..."}])
-            model: Model profile (BRAIN or HANDS)
-            tools: Optional tool definitions for function calling
-            temperature: Override model default temperature
-            max_tokens: Override model default max_tokens
-            stream: Enable streaming (not yet used)
-
-        Returns:
-            LLMResponse with content, tool_calls, usage stats
+        If LLMClient is available, delegates through it for full reliability.
+        Otherwise, falls back to direct aiohttp calls.
         """
+        start_time = time.monotonic()
+
+        if self._use_llm_client:
+            return await self._call_via_llm_client(
+                messages, model, tools, temperature, max_tokens
+            )
+        else:
+            return await self._call_via_aiohttp(
+                messages, model, tools, temperature, max_tokens
+            )
+
+    async def _call_via_llm_client(
+        self,
+        messages: list[dict[str, str]],
+        model: ModelProfile,
+        tools: Optional[list[dict[str, Any]]] = None,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+    ) -> LLMResponse:
+        """Delegate API call through LLMClient (with retry, failover, etc.)."""
+        start_time = time.monotonic()
+
+        try:
+            result = await self._llm_client.chat(
+                messages=messages,
+                model=model.model_id,
+                tools=tools,
+                temperature=temperature if temperature is not None else model.temperature,
+                max_tokens=max_tokens or model.max_tokens,
+            )
+
+            latency = time.monotonic() - start_time
+            content = result.get("content", "")
+            tool_calls_raw = result.get("tool_calls", [])
+            usage = result.get("usage", {})
+
+            # Parse tool calls
+            tool_calls = []
+            if tool_calls_raw:
+                for tc in tool_calls_raw:
+                    if isinstance(tc, dict):
+                        tool_calls.append({
+                            "id": tc.get("id", ""),
+                            "type": tc.get("type", "function"),
+                            "function": {
+                                "name": tc.get("function", {}).get("name", ""),
+                                "arguments": tc.get("function", {}).get("arguments", "{}"),
+                            },
+                        })
+
+            # Update stats
+            self._update_stats(model, usage, latency)
+
+            return LLMResponse(
+                content=content,
+                tool_calls=tool_calls,
+                finish_reason=result.get("finish_reason", ""),
+                usage=usage,
+                model=result.get("model", model.model_id),
+                latency=latency,
+            )
+
+        except Exception as e:
+            self._stats["errors"] += 1
+            raise
+
+    async def _call_via_aiohttp(
+        self,
+        messages: list[dict[str, str]],
+        model: ModelProfile,
+        tools: Optional[list[dict[str, Any]]] = None,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+    ) -> LLMResponse:
+        """Legacy direct aiohttp call (fallback when no LLMClient)."""
+        import asyncio
+        import aiohttp
+
         if not self.api_key:
             raise ValueError("OpenRouter API key not configured")
 
-        # Rate limiting
-        limiter = self._rate_limiters.get(model.model_id)
-        if limiter:
-            await limiter.acquire()
-
-        # Build payload
         payload: dict[str, Any] = {
             "model": model.model_id,
             "messages": messages,
             "temperature": temperature if temperature is not None else model.temperature,
             "max_tokens": max_tokens or model.max_tokens,
         }
-
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = "auto"
 
-        # Headers
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
@@ -243,11 +301,9 @@ class OpenRouterClient:
             "X-Title": self.app_name,
         }
 
-        # Retry loop
         last_error = None
         for attempt in range(self.retry_count):
             start_time = time.monotonic()
-
             try:
                 async with aiohttp.ClientSession() as session:
                     async with session.post(
@@ -257,50 +313,22 @@ class OpenRouterClient:
                         timeout=aiohttp.ClientTimeout(total=self.timeout),
                     ) as resp:
                         if resp.status == 429:
-                            # Rate limited — parse wait time from header or body
-                            retry_after = 10
-                            try:
-                                retry_after = int(resp.headers.get("Retry-After", 0))
-                            except (ValueError, TypeError):
-                                pass
-                            if retry_after < 1:
-                                # Try to parse from response body (OpenRouter specific)
-                                try:
-                                    body = await resp.json()
-                                    retry_ms = body.get("error", {}).get("metadata", {}).get("rateLimit", {}).get("resetRequests", "")
-                                    if retry_ms:
-                                        # Parse "Xs" or milliseconds
-                                        import re
-                                        sec_match = re.search(r"(\d+)", str(retry_ms))
-                                        if sec_match:
-                                            retry_after = int(sec_match.group(1))
-                                except Exception:
-                                    pass
-                            # Minimum 15s for free-tier, with exponential backoff
-                            retry_after = max(retry_after, 15) + (attempt * 5)
+                            retry_after = max(int(resp.headers.get("Retry-After", 15)), 15) + (attempt * 5)
                             logger.warning(f"Rate limited (429), waiting {retry_after}s (attempt {attempt + 1}/{self.retry_count})")
                             await asyncio.sleep(retry_after)
                             continue
-
                         if resp.status != 200:
                             error_text = await resp.text()
-                            logger.error(f"API error {resp.status}: {error_text[:200]}")
                             if resp.status >= 500:
-                                # Server error — retry
                                 await asyncio.sleep(2 ** attempt)
                                 continue
                             raise RuntimeError(f"OpenRouter API error {resp.status}: {error_text[:200]}")
-
                         data = await resp.json()
 
                 latency = time.monotonic() - start_time
-
-                # Parse response
                 choice = data.get("choices", [{}])[0]
                 message = choice.get("message", {})
                 usage = data.get("usage", {})
-
-                # Extract tool calls if present
                 tool_calls = []
                 if message.get("tool_calls"):
                     for tc in message["tool_calls"]:
@@ -312,10 +340,7 @@ class OpenRouterClient:
                                 "arguments": tc.get("function", {}).get("arguments", "{}"),
                             },
                         })
-
-                # Update stats
                 self._update_stats(model, usage, latency)
-
                 return LLMResponse(
                     content=message.get("content", ""),
                     tool_calls=tool_calls,
@@ -324,12 +349,10 @@ class OpenRouterClient:
                     model=data.get("model", model.model_id),
                     latency=latency,
                 )
-
             except asyncio.TimeoutError:
                 last_error = f"Timeout after {self.timeout}s (attempt {attempt + 1})"
                 logger.warning(last_error)
                 await asyncio.sleep(2 ** attempt)
-
             except aiohttp.ClientError as e:
                 last_error = f"Connection error: {e} (attempt {attempt + 1})"
                 logger.warning(last_error)
@@ -358,21 +381,8 @@ class OpenRouterClient:
         temperature: Optional[float] = None,
         tools: Optional[list[dict[str, Any]]] = None,
     ) -> str:
-        """
-        Call the Brain model (gpt-oss-120B) for strategic reasoning.
-
-        Args:
-            prompt: The reasoning task
-            system_prompt: Override system prompt
-            context: Additional context to prepend
-            temperature: Override default (0.6)
-            tools: Optional tool definitions
-
-        Returns:
-            Model response text
-        """
+        """Call the Brain model (gpt-oss-120B) for strategic reasoning."""
         messages = []
-
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
         else:
@@ -385,19 +395,14 @@ class OpenRouterClient:
                     "Provide clear, actionable strategic plans."
                 ),
             })
-
         if context:
             prompt = f"Context:\n{context}\n\nTask:\n{prompt}"
-
         messages.append({"role": "user", "content": prompt})
 
         response = await self._call_api(
-            messages=messages,
-            model=self.BRAIN,
-            temperature=temperature,
-            tools=tools,
+            messages=messages, model=self.BRAIN,
+            temperature=temperature, tools=tools,
         )
-
         logger.debug(f"Brain response ({response.latency:.2f}s): {response.content[:100]}...")
         return response.content
 
@@ -409,21 +414,8 @@ class OpenRouterClient:
         temperature: Optional[float] = None,
         tools: Optional[list[dict[str, Any]]] = None,
     ) -> str:
-        """
-        Call the Hands model (qwen3-coder:free) for code generation.
-
-        Args:
-            task: The coding task
-            system_prompt: Override system prompt
-            context: Additional context to prepend
-            temperature: Override default (0.2)
-            tools: Optional tool definitions
-
-        Returns:
-            Model response text (typically code)
-        """
+        """Call the Hands model for code generation."""
         messages = []
-
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
         else:
@@ -436,19 +428,14 @@ class OpenRouterClient:
                     "Focus on correctness, efficiency, and reliability."
                 ),
             })
-
         if context:
             task = f"Context:\n{context}\n\nTask:\n{task}"
-
         messages.append({"role": "user", "content": task})
 
         response = await self._call_api(
-            messages=messages,
-            model=self.HANDS,
-            temperature=temperature,
-            tools=tools,
+            messages=messages, model=self.HANDS,
+            temperature=temperature, tools=tools,
         )
-
         logger.debug(f"Hands response ({response.latency:.2f}s): {response.content[:100]}...")
         return response.content
 
@@ -460,19 +447,7 @@ class OpenRouterClient:
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
     ) -> LLMResponse:
-        """
-        Raw API call with full control over messages and model.
-
-        Args:
-            messages: Full message list
-            model: Model profile (defaults to Brain)
-            tools: Optional tool definitions
-            temperature: Override temperature
-            max_tokens: Override max_tokens
-
-        Returns:
-            Full LLMResponse object
-        """
+        """Raw API call with full control over messages and model."""
         return await self._call_api(
             messages=messages,
             model=model or self.BRAIN,
@@ -489,42 +464,22 @@ class OpenRouterClient:
         context: Optional[str] = None,
         review: bool = False,
     ) -> dict[str, str]:
-        """
-        Full dual-brain collaboration: Brain plans -> Hands codes -> Brain reviews (optional).
-
-        Args:
-            task: The complex task requiring both reasoning and coding
-            context: Additional context
-            review: Whether Brain should review the code
-
-        Returns:
-            Dict with "plan", "code", and optionally "review"
-        """
-        # Step 1: Brain plans
+        """Full dual-brain collaboration: Brain plans -> Hands codes -> Brain reviews."""
         plan = await self.call_brain(
             prompt=f"Plan the implementation strategy for: {task}",
-            context=context,
-            temperature=0.6,
+            context=context, temperature=0.6,
         )
-
-        # Step 2: Hands codes
         code = await self.call_hands(
             task=f"Implement this plan:\n{plan}",
-            context=context,
-            temperature=0.2,
+            context=context, temperature=0.2,
         )
-
         result = {"plan": plan, "code": code}
-
-        # Step 3: Brain reviews (optional)
         if review:
             review_result = await self.call_brain(
                 prompt=f"Review this code for correctness and security:\n{code}",
-                context=f"Original plan:\n{plan}",
-                temperature=0.4,
+                context=f"Original plan:\n{plan}", temperature=0.4,
             )
             result["review"] = review_result
-
         return result
 
     # ── Utility Methods ───────────────────────────────────────────────────
@@ -540,13 +495,17 @@ class OpenRouterClient:
     def get_stats(self) -> dict[str, Any]:
         """Get usage statistics."""
         total_calls = self._stats["brain_calls"] + self._stats["hands_calls"]
-        return {
+        stats = {
             **self._stats,
             "total_calls": total_calls,
-            "brain_ratio": (
-                self._stats["brain_calls"] / total_calls if total_calls > 0 else 0
-            ),
-            "avg_latency": (
-                self._stats["total_latency"] / total_calls if total_calls > 0 else 0
-            ),
+            "brain_ratio": self._stats["brain_calls"] / total_calls if total_calls > 0 else 0,
+            "avg_latency": self._stats["total_latency"] / total_calls if total_calls > 0 else 0,
         }
+
+        # Merge LLMClient stats if available
+        if self._use_llm_client:
+            report = self._llm_client.get_health_report()
+            stats["llm_client_health"] = report.get("health", {})
+            stats["llm_client_cost"] = report.get("cost", {})
+
+        return stats

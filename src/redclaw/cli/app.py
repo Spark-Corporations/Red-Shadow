@@ -1,13 +1,11 @@
 """
-RedClaw CLI — Claude Code-style interactive pentesting terminal.
+RedClaw CLI — Claude Code-style enterprise pentesting terminal.
 
-Features:
-  - Rich terminal output with panels, tables, progress bars
-  - Interactive REPL with auto-completion
-  - Slash commands (/scan, /exploit, /report, /status, /config, /quit)
-  - Streaming agent output with live updates
-  - Phase progress visualization
-  - Finding severity color coding
+Visually mirrors Claude Code's interface:
+  - Welcome panel with mascot + version info (left) and tips (right)
+  - Streaming agent output with live task panels
+  - Bottom status bar with keyboard shortcuts
+  - All slash commands for pentest operations + LLM reliability monitoring
 """
 
 from __future__ import annotations
@@ -15,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import shutil
 import sys
 import time
 from pathlib import Path
@@ -24,61 +23,24 @@ from prompt_toolkit import PromptSession
 from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
 from prompt_toolkit.completion import WordCompleter
 from prompt_toolkit.history import FileHistory
-from prompt_toolkit.styles import Style
+from rich.columns import Columns
 from rich.console import Console
-from rich.layout import Layout
-from rich.live import Live
 from rich.markdown import Markdown
 from rich.panel import Panel
-from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn
 from rich.table import Table
 from rich.text import Text
-from rich.theme import Theme
+
+from .mascot import get_mascot, get_model_badge, get_version_badge
+from .theme import PROMPT_STYLE, REDCLAW_THEME
 
 logger = logging.getLogger("redclaw.cli")
 
-# ── Theme ─────────────────────────────────────────────────────────────────────
-
-REDCLAW_THEME = Theme({
-    "info": "dim cyan",
-    "warning": "yellow",
-    "error": "bold red",
-    "critical": "bold white on red",
-    "success": "bold green",
-    "phase": "bold magenta",
-    "finding.critical": "bold white on red",
-    "finding.high": "bold red",
-    "finding.medium": "yellow",
-    "finding.low": "cyan",
-    "finding.info": "dim white",
-    "tool": "bold blue",
-    "agent": "bold cyan",
-})
-
-PROMPT_STYLE = Style.from_dict({
-    "prompt": "#ff4444 bold",
-    "input": "#ffffff",
-})
-
-# ── Banner ────────────────────────────────────────────────────────────────────
-
-BANNER = r"""
-[bold red]
-  ██████╗ ███████╗██████╗  ██████╗██╗      █████╗ ██╗    ██╗
-  ██╔══██╗██╔════╝██╔══██╗██╔════╝██║     ██╔══██╗██║    ██║
-  ██████╔╝█████╗  ██║  ██║██║     ██║     ███████║██║ █╗ ██║
-  ██╔══██╗██╔══╝  ██║  ██║██║     ██║     ██╔══██║██║███╗██║
-  ██║  ██║███████╗██████╔╝╚██████╗███████╗██║  ██║╚███╔███╔╝
-  ╚═╝  ╚═╝╚══════╝╚═════╝  ╚═════╝╚══════╝╚═╝  ╚═╝ ╚══╝╚══╝[/]
-[dim white]  v3.1.0 "Red Shadow" — Autonomous Penetration Testing Platform
-  Powered by OpenRouter (Brain + Hands) + Zero-Day Hunter[/]
-"""
 
 # ── Slash Commands ────────────────────────────────────────────────────────────
 
 SLASH_COMMANDS = {
     "/help": "Show available commands",
-    "/pentest": "Full autonomous pentest (scan -> exploit -> zero-day -> report)",
+    "/pentest": "Full autonomous pentest (scan → exploit → zero-day → report)",
     "/status": "Show pipeline and agent status",
     "/config": "Show current engagement configuration",
     "/scan": "Start a scan on configured targets",
@@ -90,15 +52,18 @@ SLASH_COMMANDS = {
     "/guardian": "Show GuardianRails statistics",
     "/checkpoint": "Save current state to disk",
     "/resume": "Resume from last checkpoint",
-    "/proxy": "Start the Anthropic->OpenAI reverse proxy",
+    "/proxy": "Start the Anthropic→OpenAI reverse proxy",
     "/agent": "Show agent loop stats and LLM provider health",
     "/skin": "Launch Claude Code with RedClaw pentesting skin",
     "/doctor": "Health-check all tool dependencies",
     "/setup-tools": "Auto-install missing pentesting tools",
     "/link": "View/update LLM backend endpoint URL",
-    "/apikey": "Set or view API key for LLM provider (Gemini, OpenAI, etc.)",
-    "/ip_m": "Update model IP when GCP restarts (e.g. /ip_m 35.223.143.247)",
-    "/model": "Switch active model: /model gemini | /model openai | /model groq",
+    "/apikey": "Set or view API key for LLM provider",
+    "/ip_m": "Update model IP when GCP restarts",
+    "/model": "Switch active model: /model gemini | openai | groq",
+    "/monitor": "LLM reliability dashboard (retry stats, costs, health)",
+    "/providers": "Show provider failover chain status",
+    "/budget": "Show LLM cost tracking and budget",
     "/clear": "Clear the terminal",
     "/quit": "Exit RedClaw",
 }
@@ -106,7 +71,7 @@ SLASH_COMMANDS = {
 
 class RedClawCLI:
     """
-    Claude Code-style interactive CLI for pentesting operations.
+    Enterprise CLI for autonomous pentesting — Claude Code visual design.
 
     Usage:
         cli = RedClawCLI()
@@ -120,6 +85,7 @@ class RedClawCLI:
         runtime=None,
         orchestrator=None,
         guardian=None,
+        llm_client=None,
     ):
         self._console = Console(theme=REDCLAW_THEME)
         self._config = config_manager
@@ -127,6 +93,7 @@ class RedClawCLI:
         self._runtime = runtime
         self._orchestrator = orchestrator
         self._guardian = guardian
+        self._llm_client = llm_client
         self._running = False
         self._history_file = Path.home() / ".redclaw_history"
 
@@ -135,13 +102,95 @@ class RedClawCLI:
             list(SLASH_COMMANDS.keys()) + ["nmap", "masscan", "nuclei", "metasploit"],
             ignore_case=True,
         )
-
         logger.info("RedClaw CLI initialized")
+
+    # ── Welcome Screen (Claude Code Layout) ──────────────────────────────
+
+    def _show_welcome(self) -> None:
+        """Show Claude Code-style welcome screen with mascot and tips."""
+        width = self._console.width or 100
+
+        # ── Left Panel: Mascot + Version ──
+        mascot = get_mascot(width)
+        version_badge = get_version_badge()
+
+        # Get active model info
+        model_file = Path.home() / ".redclaw" / "active_model.txt"
+        active_model = "gemini"
+        if model_file.exists():
+            active_model = model_file.read_text().strip().lower()
+
+        model_display = {
+            "gemini": "Gemini 2.5 Flash",
+            "openai": "GPT-4o-mini",
+            "groq": "Llama 3.3 70B",
+            "openrouter": "Qwen 2.5 Coder",
+            "gpt-oss": "GPT-OSS 120B (Free)",
+            "dolphin": "Dolphin Mistral 24B",
+            "nemotron": "Nemotron 3 Nano 30B",
+            "qwen": "Qwen (self-hosted)",
+            "phi": "Phi-4 (self-hosted)",
+        }.get(active_model, active_model)
+
+        model_badge = get_model_badge(model_display, "API Usage")
+
+        left_content = (
+            f"[bold #ff4444]Welcome![/]\n\n"
+            f"{mascot}\n"
+            f"  {model_badge}\n"
+            f"  {version_badge}"
+        )
+
+        # ── Right Panel: Tips + Recent Activity ──
+        right_content = (
+            "[bold #ffaa00]Tips for getting started[/]\n"
+            "  Run [bold]/pentest <target_ip>[/] to start autonomous pentesting\n"
+            "  Run [bold]/model[/] to switch LLM provider\n"
+            "  Run [bold]/doctor[/] to check tool dependencies\n"
+            "  Run [bold]/monitor[/] to view LLM reliability dashboard\n\n"
+            "[bold #ffaa00]Recent activity[/]\n"
+        )
+
+        # Check for recent engagements
+        engagement_dir = Path.home() / ".redclaw" / "engagements"
+        if engagement_dir.exists():
+            engagements = sorted(engagement_dir.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True)[:3]
+            if engagements:
+                for eng in engagements:
+                    right_content += f"  [dim]{eng.name}[/]\n"
+            else:
+                right_content += "  [dim]No recent activity[/]\n"
+        else:
+            right_content += "  [dim]No recent activity[/]\n"
+
+        # ── Combine in Claude Code layout ──
+        if width >= 90:
+            left_panel = Panel(
+                left_content,
+                border_style="#ff4444",
+                width=width // 2 - 2,
+                padding=(1, 2),
+            )
+            right_panel = Panel(
+                right_content,
+                border_style="dim",
+                width=width // 2 - 2,
+                padding=(1, 2),
+            )
+            self._console.print(Columns([left_panel, right_panel], padding=1))
+        else:
+            self._console.print(Panel(left_content + "\n\n" + right_content, border_style="#ff4444"))
+
+        # ── Model switch hint ──
+        self._console.print(
+            f"\n  [dim]/model to switch providers  ·  /help for all commands[/]\n"
+        )
+
+    # ── Main REPL ────────────────────────────────────────────────────────
 
     def run(self) -> None:
         """Start the interactive CLI REPL."""
-        self._console.print(BANNER)
-        self._show_system_status()
+        self._show_welcome()
         self._running = True
 
         session: PromptSession = PromptSession(
@@ -151,15 +200,15 @@ class RedClawCLI:
             style=PROMPT_STYLE,
         )
 
+        # Bottom bar hint
         self._console.print(
-            "\n[dim]Type a command or natural language instruction. "
-            "Use /help for available commands.[/]\n"
+            "[bar.key]> [/][dim]Type a command or natural language instruction[/]\n"
         )
 
         while self._running:
             try:
                 user_input = session.prompt(
-                    [("class:prompt", "redclaw ❯ ")],
+                    [("class:prompt", "> ")],
                 ).strip()
 
                 if not user_input:
@@ -206,6 +255,9 @@ class RedClawCLI:
             "/apikey": self._cmd_apikey,
             "/ip_m": self._cmd_ip_m,
             "/model": self._cmd_model,
+            "/monitor": self._cmd_monitor,
+            "/providers": self._cmd_providers,
+            "/budget": self._cmd_budget,
             "/clear": self._cmd_clear,
             "/quit": self._cmd_quit,
         }
@@ -216,7 +268,7 @@ class RedClawCLI:
         else:
             self._console.print(f"[error]Unknown command: {cmd}. Type /help for options.[/]")
 
-    # ── Command handlers ──────────────────────────────────────────────────
+    # ── Command Handlers ─────────────────────────────────────────────────
 
     def _cmd_help(self, args: list[str]) -> None:
         table = Table(title="RedClaw Commands", style="red", border_style="dim")
@@ -227,7 +279,7 @@ class RedClawCLI:
         self._console.print(table)
 
     def _cmd_pentest(self, args: list[str]) -> None:
-        """Run full autonomous pentest: scan -> exploit -> zero-day -> post-exploit -> report."""
+        """Run full autonomous pentest pipeline."""
         target = args[0] if args else None
         if not target:
             self._console.print(
@@ -251,7 +303,6 @@ class RedClawCLI:
             )
             return
 
-        # Approval prompt
         self._console.print(
             Panel(
                 f"[warning]TARGET:[/] [bold]{target}[/]\n\n"
@@ -292,8 +343,6 @@ class RedClawCLI:
 
     def _cmd_status(self, args: list[str]) -> None:
         panel_content = []
-
-        # Pipeline status
         if self._state:
             state = self._state.state
             phase_status = self._state.get_phase_status(self._state.current_phase)
@@ -303,30 +352,33 @@ class RedClawCLI:
         else:
             panel_content.append("[dim]No active engagement[/]")
 
-        # Runtime status — REAL health, not fake
         if self._runtime:
             status = self._runtime.get_status()
             health = status.get('health', 'not_initialized')
-
             if health == 'ready':
                 panel_content.append(f"\n[agent]OpenClaw[/]: 🟢 Ready (LLM reachable)")
             elif health == 'degraded':
                 panel_content.append(f"\n[agent]OpenClaw[/]: 🟡 Degraded (LLM unreachable)")
             else:
                 panel_content.append(f"\n[agent]OpenClaw[/]: 🔴 Not initialized")
-
             panel_content.append(f"[tool]LLM[/]: {status.get('llm_model', 'N/A')}")
             panel_content.append(f"[tool]Endpoint[/]: {status.get('llm_endpoint', 'N/A')}")
-
-            # Per-provider health
             providers = status.get('health_providers', {})
             if providers:
                 for name, info in providers.items():
                     reachable = info.get('reachable', False)
                     icon = '✅' if reachable else '❌'
                     panel_content.append(f"  {icon} {name}: {'reachable' if reachable else 'unreachable'}")
-
             panel_content.append(f"[tool]Tools[/]: {status.get('tool_bridge', 'none')}")
+
+        # LLM Client health
+        if self._llm_client:
+            report = self._llm_client.get_health_report()
+            health = report.get("health", {})
+            panel_content.append(f"\n[agent]LLM Client[/]:")
+            panel_content.append(f"  Success Rate: {health.get('success_rate', 'N/A')}")
+            panel_content.append(f"  Avg Latency: {health.get('avg_latency', 'N/A')}")
+            panel_content.append(f"  Total Calls: {health.get('total_calls', 0)}")
 
         self._console.print(Panel(
             "\n".join(panel_content),
@@ -357,12 +409,9 @@ class RedClawCLI:
             self._console.print("[warning]Usage: /scan <target>[/]")
             self._console.print("[dim]Example: /scan 10.10.10.5[/]")
             return
-
         if not self._runtime:
             self._console.print("[error]OpenClaw runtime not available. Cannot scan.[/]")
             return
-
-        # Delegate to the REAL agent loop — this calls LLM which uses MCP tools
         task_prompt = (
             f"Perform a comprehensive network scan on target: {target}\n"
             "1. Use masscan or nmap for fast port discovery\n"
@@ -386,21 +435,16 @@ class RedClawCLI:
                 border_style="red",
             )
         )
-        # Get user's confirmation
         try:
             answer = input("Proceed? [yes/no] > ").strip().lower()
         except (EOFError, KeyboardInterrupt):
             answer = "no"
-
         if answer != "yes":
             self._console.print("[dim]Exploitation cancelled.[/]")
             return
-
         if not self._runtime:
             self._console.print("[error]OpenClaw runtime not available.[/]")
             return
-
-        # Delegate to REAL agent loop
         task_prompt = (
             f"Exploitation phase for target: {target or 'engagement targets'}\n"
             "1. Review all findings from the scanning phase\n"
@@ -427,31 +471,23 @@ class RedClawCLI:
         if not self._state:
             self._console.print("[dim]No findings yet.[/]")
             return
-
         findings = self._state.state.global_findings
         if not findings:
             self._console.print("[dim]No findings recorded.[/]")
             return
-
         table = Table(title=f"Findings ({len(findings)})", border_style="dim")
         table.add_column("#", style="dim")
         table.add_column("Severity", justify="center")
         table.add_column("Title")
         table.add_column("Phase")
-
         sev_styles = {
-            "critical": "finding.critical",
-            "high": "finding.high",
-            "medium": "finding.medium",
-            "low": "finding.low",
-            "info": "finding.info",
+            "critical": "finding.critical", "high": "finding.high",
+            "medium": "finding.medium", "low": "finding.low", "info": "finding.info",
         }
-
         for i, f in enumerate(findings, 1):
             sev = f.severity
             style = sev_styles.get(sev, "dim")
             table.add_row(str(i), Text(sev.upper(), style=style), f.title, f.phase)
-
         self._console.print(table)
 
     def _cmd_tools(self, args: list[str]) -> None:
@@ -468,17 +504,13 @@ class RedClawCLI:
             ("bloodhound", "AD domain analysis", "bloodhound-python"),
             ("custom_exploit", "Python/Bash exploit scripts", None),
         ]
-
-        import shutil
         table = Table(title="MCP Tool Servers", border_style="dim")
         table.add_column("Tool", style="tool")
         table.add_column("Description")
         table.add_column("Status", justify="center")
-
         installed = 0
         for name, desc, binary in tools_meta:
             if binary is None:
-                # Custom exploit — always available (it's our own code)
                 table.add_row(name, desc, "🟢 Ready")
                 installed += 1
             elif shutil.which(binary):
@@ -486,21 +518,16 @@ class RedClawCLI:
                 installed += 1
             else:
                 table.add_row(name, desc, "🔴 Not installed")
-
         self._console.print(table)
         total = len(tools_meta)
-        self._console.print(
-            f"[dim]{installed}/{total} tools available. "
-            f"Use /setup-tools to install missing tools.[/]"
-        )
+        self._console.print(f"[dim]{installed}/{total} tools available. Use /setup-tools to install missing.[/]")
 
     def _cmd_sessions(self, args: list[str]) -> None:
         self._console.print(Panel(
             "[info]Local Session[/]: 🟢 Active\n"
             "[info]Remote Session[/]: 🔴 Not connected\n"
             "[dim]Use 'connect <host> <user> <pass>' to establish SSH session[/]",
-            title="Sessions",
-            border_style="dim",
+            title="Sessions", border_style="dim",
         ))
 
     def _cmd_guardian(self, args: list[str]) -> None:
@@ -511,8 +538,7 @@ class RedClawCLI:
                 f"Blocked: {stats['blocked']}\n"
                 f"Allowed: {stats['allowed']}\n"
                 f"Block rate: {stats['block_rate']}",
-                title="GuardianRails Statistics",
-                border_style="yellow",
+                title="GuardianRails Statistics", border_style="yellow",
             ))
         else:
             self._console.print("[dim]GuardianRails not initialized.[/]")
@@ -527,11 +553,7 @@ class RedClawCLI:
     def _cmd_proxy(self, args: list[str]) -> None:
         """Start the Anthropic→OpenAI reverse proxy."""
         from ..proxy.server import start_proxy
-        import os
-        backend = args[0] if args else os.environ.get(
-            "REDCLAW_LLM_URL",
-            "https://0b2f-34-29-72-116.ngrok-free.app"
-        )
+        backend = args[0] if args else os.environ.get("REDCLAW_LLM_URL", "https://0b2f-34-29-72-116.ngrok-free.app")
         port = int(args[1]) if len(args) > 1 else 8080
         self._console.print(
             f"[tool]Starting reverse proxy[/]\n"
@@ -546,7 +568,6 @@ class RedClawCLI:
         if not self._runtime:
             self._console.print("[warning]Runtime not initialized.[/]")
             return
-
         status = self._runtime.get_status()
         panel_lines = [
             f"[agent]Initialized[/]: {'🟢 Yes' if status['initialized'] else '🔴 No'}",
@@ -556,37 +577,23 @@ class RedClawCLI:
             f"[info]Last Iterations[/]: {status.get('last_iterations', 0)}",
             f"[info]Tool Bridge[/]: {status.get('tool_bridge', 'N/A')}",
         ]
-
-        # Provider stats
         if pstats := status.get('provider_stats'):
             panel_lines.append(f"\n[agent]Provider[/]: {pstats.get('active_provider', 'N/A')}")
             panel_lines.append(f"[info]Requests[/]: {pstats.get('total_requests', 0)}")
             panel_lines.append(f"[info]Tokens[/]: {pstats.get('total_tokens', 0)}")
-
-        # Health check
         if self._runtime.provider:
             health = self._runtime.provider.health_check()
             panel_lines.append("\n[phase]Health Check[/]:")
             for name, info in health.items():
                 icon = '🟢' if info.get('reachable') else '🔴'
                 panel_lines.append(f"  {icon} {name}")
-
-        self._console.print(Panel(
-            "\n".join(panel_lines),
-            title="[bold]Agent Loop Status[/]",
-            border_style="cyan",
-        ))
+        self._console.print(Panel("\n".join(panel_lines), title="[bold]Agent Loop Status[/]", border_style="cyan"))
 
     def _cmd_skin(self, args: list[str]) -> None:
         """Launch Claude Code with RedClaw pentesting skin."""
         from ..claude_skin.launcher import ClaudeCodeLauncher
-
         targets = args if args else []
-        launcher = ClaudeCodeLauncher(
-            targets=targets,
-            enable_guardian=self._guardian is not None,
-        )
-
+        launcher = ClaudeCodeLauncher(targets=targets, enable_guardian=self._guardian is not None)
         if not launcher.check_claude_installed():
             self._console.print(
                 "[error]Claude Code CLI not found.[/]\n"
@@ -594,20 +601,13 @@ class RedClawCLI:
                 "Or use RedClaw standalone mode (current)."
             )
             return
-
         self._console.print("[agent]Launching Claude Code with RedClaw skin...[/]")
-        status = launcher.get_status()
-        self._console.print(f"  Proxy needed: {status['proxy_needed']}")
-        self._console.print(f"  Skills: {status['skills_available']}")
-
-        # Transfer control to Claude Code
-        self._running = False  # Exit current REPL
+        self._running = False
         exit_code = launcher.launch()
         if exit_code != 0:
             self._console.print(f"[warning]Claude Code exited with code {exit_code}[/]")
 
     def _cmd_doctor(self, args: list[str]) -> None:
-        """Run health-check on all tool dependencies."""
         try:
             from ..tooling.doctor import DoctorReport
             doctor = DoctorReport()
@@ -618,134 +618,75 @@ class RedClawCLI:
             self._console.print(f"[error]Doctor failed: {e}[/]")
 
     def _cmd_setup_tools(self, args: list[str]) -> None:
-        """Auto-install missing pentesting tool dependencies."""
         mode = args[0] if args else "interactive"
         try:
             from ..tooling.installer import ToolInstaller
             installer = ToolInstaller()
             dry_run = mode == "dry-run"
             auto = mode == "auto"
-            installer.install_all(
-                console=self._console,
-                dry_run=dry_run,
-                auto_approve=auto,
-            )
+            installer.install_all(console=self._console, dry_run=dry_run, auto_approve=auto)
         except ImportError:
             self._console.print("[error]Tooling module not available.[/]")
         except Exception as e:
             self._console.print(f"[error]Setup failed: {e}[/]")
 
     def _cmd_link(self, args: list[str]) -> None:
-        """View or update the ngrok LLM backend URL (REDCLAW_LLM_URL)."""
         link_file = Path.home() / ".redclaw" / "link.txt"
-
         if not args:
-            # Show current URL
             current = os.environ.get("REDCLAW_LLM_URL", None)
-            saved = None
-            if link_file.exists():
-                saved = link_file.read_text().strip()
-
-            # Also show runtime endpoint if different
+            saved = link_file.read_text().strip() if link_file.exists() else None
             runtime_url = None
             if self._runtime:
                 status = self._runtime.get_status()
                 runtime_url = status.get("llm_endpoint")
-
             self._console.print(Panel(
                 f"[info]Active URL[/]:  {runtime_url or current or '[dim]not set[/]'}\n"
                 f"[info]Saved URL[/]:   {saved or '[dim]none[/]'}\n\n"
                 "[dim]Usage: /link <ngrok_url>[/]",
-                title="[bold]LLM Backend Link[/]",
-                border_style="red",
+                title="[bold]LLM Backend Link[/]", border_style="red",
             ))
             return
-
         new_url = args[0].strip()
         if not new_url.startswith("http"):
             new_url = f"https://{new_url}"
-
-        # Update env at runtime
         os.environ["REDCLAW_LLM_URL"] = new_url
-
-        # Persist for next session
         link_file.parent.mkdir(parents=True, exist_ok=True)
         link_file.write_text(new_url)
-
-        # ── Hot-reload: rebuild the LLM provider with the new URL ──────────
         if self._runtime:
             self._runtime._config.llm_endpoint = new_url
             try:
-                import asyncio
                 health = asyncio.run(self._runtime.initialize())
-                reachable = health.get("status") == "ready"
-                if reachable:
-                    self._console.print(
-                        f"[success]✅ LLM backend URL updated and connected:[/]\n"
-                        f"   [info]{new_url}[/]\n"
-                        f"   [success]🟢 LLM reachable![/]"
-                    )
+                if health.get("status") == "ready":
+                    self._console.print(f"[success]✅ URL updated & connected:[/]\n   [info]{new_url}[/]")
                 else:
-                    self._console.print(
-                        f"[warning]⚠️  LLM backend URL updated but unreachable:[/]\n"
-                        f"   [info]{new_url}[/]\n"
-                        f"   [warning]🟡 Will retry when you send a command[/]"
-                    )
+                    self._console.print(f"[warning]⚠️  URL updated but unreachable:[/]\n   [info]{new_url}[/]")
             except Exception:
-                self._console.print(
-                    f"[success]✅ LLM backend URL updated:[/]\n"
-                    f"   [info]{new_url}[/]\n"
-                    f"   [dim]Saved to {link_file}[/]"
-                )
+                self._console.print(f"[success]✅ URL updated:[/]\n   [info]{new_url}[/]")
         else:
-            self._console.print(
-                f"[success]✅ LLM backend URL updated:[/]\n"
-                f"   [info]{new_url}[/]\n"
-                f"   [dim]Saved to {link_file}[/]"
-            )
+            self._console.print(f"[success]✅ URL updated:[/]\n   [info]{new_url}[/]")
 
     def _cmd_apikey(self, args: list[str]) -> None:
-        """Set or view the API key for LLM provider.
-
-        Usage:
-            /apikey              → show current API key (masked)
-            /apikey AIza...      → save new API key
-            /apikey clear        → remove saved API key
-        """
         key_file = Path.home() / ".redclaw" / "api_key.txt"
-
         if not args:
-            # Show current key
             env_key = os.environ.get("REDCLAW_LLM_KEY")
             file_key = key_file.read_text().strip() if key_file.exists() else None
             active_key = env_key or file_key
-
             if active_key:
-                # Mask: show first 4 and last 4 chars
-                if len(active_key) > 12:
-                    masked = active_key[:4] + "..." + active_key[-4:]
-                else:
-                    masked = active_key[:4] + "..."
+                masked = active_key[:4] + "..." + active_key[-4:] if len(active_key) > 12 else active_key[:4] + "..."
                 source = "env REDCLAW_LLM_KEY" if env_key else f"{key_file}"
                 self._console.print(Panel(
-                    f"[info]API Key[/]:    {masked}\n"
-                    f"[info]Source[/]:     {source}",
-                    title="[bold]API Key[/]",
-                    border_style="red",
+                    f"[info]API Key[/]:    {masked}\n[info]Source[/]:     {source}",
+                    title="[bold]API Key[/]", border_style="red",
                 ))
             else:
                 self._console.print(Panel(
                     "[warning]No API key configured.[/]\n\n"
                     "[dim]Usage: /apikey <your-api-key>[/]\n"
                     "[dim]Get a Gemini key: https://aistudio.google.com/apikey[/]",
-                    title="[bold]API Key[/]",
-                    border_style="red",
+                    title="[bold]API Key[/]", border_style="red",
                 ))
             return
-
         new_key = args[0].strip()
-
-        # Handle clear
         if new_key.lower() == "clear":
             if key_file.exists():
                 key_file.unlink()
@@ -753,256 +694,73 @@ class RedClawCLI:
                 del os.environ["REDCLAW_LLM_KEY"]
             self._console.print("[success]✅ API key cleared.[/]")
             return
-
-        # Save new key
         key_file.parent.mkdir(parents=True, exist_ok=True)
         key_file.write_text(new_key)
         os.environ["REDCLAW_LLM_KEY"] = new_key
-
-        # Hot-reload runtime with new key
-        if self._runtime:
-            self._runtime._config.llm_api_key = new_key
-            try:
-                import asyncio
-                health = asyncio.run(self._runtime.initialize())
-                reachable = health.get("status") == "ready"
-                if reachable:
-                    masked = new_key[:4] + "..." + new_key[-4:] if len(new_key) > 12 else new_key[:4] + "..."
-                    self._console.print(
-                        f"[success]✅ API key saved & connected:[/]\n"
-                        f"   [info]Key: {masked}[/]\n"
-                        f"   [success]🟢 LLM reachable![/]"
-                    )
-                else:
-                    self._console.print(
-                        f"[warning]⚠️  API key saved but LLM unreachable.[/]\n"
-                        f"   [dim]Check: /model, /agent[/]"
-                    )
-            except Exception as e:
-                self._console.print(
-                    f"[success]✅ API key saved.[/]\n"
-                    f"   [dim]Saved to {key_file}[/]"
-                )
-        else:
-            masked = new_key[:4] + "..." + new_key[-4:] if len(new_key) > 12 else new_key[:4] + "..."
-            self._console.print(
-                f"[success]✅ API key saved:[/]\n"
-                f"   [info]Key: {masked}[/]\n"
-                f"   [dim]Saved to {key_file}[/]"
-            )
+        masked = new_key[:4] + "..." + new_key[-4:] if len(new_key) > 12 else new_key[:4] + "..."
+        self._console.print(f"[success]✅ API key saved:[/]\n   [info]Key: {masked}[/]")
 
     def _cmd_ip_m(self, args: list[str]) -> None:
-        """Update the model's IP address when GCP instance restarts.
-
-        Usage:
-            /ip_m                    → show current model IP
-            /ip_m 35.223.143.247     → update to new IP (keeps port 8002)
-            /ip_m 35.223.143.247:8003 → update IP and port
-        """
         ip_file = Path.home() / ".redclaw" / "model_ip.txt"
         default_port = "8002"
-
         if not args:
-            # Show current model IP
             current_endpoint = None
             if self._runtime:
                 status = self._runtime.get_status()
                 current_endpoint = status.get("llm_endpoint")
-
-            saved_ip = None
-            if ip_file.exists():
-                saved_ip = ip_file.read_text().strip()
-
+            saved_ip = ip_file.read_text().strip() if ip_file.exists() else None
             self._console.print(Panel(
                 f"[info]Active Endpoint[/]:  {current_endpoint or '[dim]not set[/]'}\n"
                 f"[info]Saved Model IP[/]:   {saved_ip or '[dim]none[/]'}\n\n"
-                "[dim]Usage: /ip_m <new_ip>[/]\n"
-                "[dim]Example: /ip_m 35.223.143.247[/]\n"
-                "[dim]Example: /ip_m 35.223.143.247:8003[/]",
-                title="[bold]Model IP Configuration[/]",
-                border_style="red",
+                "[dim]Usage: /ip_m <ip>[/]",
+                title="[bold]Model IP[/]", border_style="red",
             ))
             return
-
-        # Parse IP input
         raw_input = args[0].strip()
-
-        # Strip protocol prefix if user accidentally adds it
         for prefix in ("http://", "https://"):
             if raw_input.startswith(prefix):
                 raw_input = raw_input[len(prefix):]
-
-        # Split IP and port
         if ":" in raw_input:
             ip_part, port_part = raw_input.rsplit(":", 1)
         else:
-            ip_part = raw_input
-            port_part = default_port
-
-        # Build the full endpoint URL
+            ip_part, port_part = raw_input, default_port
         new_url = f"http://{ip_part}:{port_part}"
-
-        # Persist the IP for next session
         ip_file.parent.mkdir(parents=True, exist_ok=True)
         ip_file.write_text(f"{ip_part}:{port_part}")
-
-        # Update environment
         os.environ["REDCLAW_LLM_URL"] = new_url
-
-        # Also update the link.txt so /link stays in sync
         link_file = Path.home() / ".redclaw" / "link.txt"
         link_file.write_text(new_url)
-
-        # Hot-reload runtime
-        if self._runtime:
-            self._runtime._config.llm_endpoint = new_url
-            try:
-                import asyncio
-                health = asyncio.run(self._runtime.initialize())
-                reachable = health.get("status") == "ready"
-                if reachable:
-                    self._console.print(
-                        f"[success]✅ Model IP updated and connected:[/]\n"
-                        f"   [info]IP: {ip_part}[/]\n"
-                        f"   [info]Port: {port_part}[/]\n"
-                        f"   [info]Endpoint: {new_url}[/]\n"
-                        f"   [success]🟢 Model reachable![/]"
-                    )
-                else:
-                    self._console.print(
-                        f"[warning]⚠️  Model IP updated but unreachable:[/]\n"
-                        f"   [info]{new_url}[/]\n"
-                        f"   [warning]🟡 Is the model running? Check GCP VM.[/]"
-                    )
-            except Exception:
-                self._console.print(
-                    f"[success]✅ Model IP updated:[/]\n"
-                    f"   [info]{new_url}[/]\n"
-                    f"   [dim]Saved to {ip_file}[/]"
-                )
-        else:
-            self._console.print(
-                f"[success]✅ Model IP updated:[/]\n"
-                f"   [info]{new_url}[/]\n"
-                f"   [dim]Saved to {ip_file}[/]"
-            )
+        self._console.print(f"[success]✅ Model IP updated:[/]\n   [info]{new_url}[/]")
 
     def _cmd_model(self, args: list[str]) -> None:
-        """Switch between model backends.
-
-        Usage:
-            /model          → show current active model
-            /model gemini   → Gemini 2.5 Flash via Google AI API
-            /model openai   → GPT-4o-mini via OpenAI API  
-            /model groq     → Llama 3.3 70B via Groq API
-            /model openrouter → Qwen 2.5 Coder via OpenRouter
-            /model gpt-oss  → GPT-OSS 120B (FREE, OpenRouter)
-            /model dolphin  → Dolphin Mistral 24B (FREE, OpenRouter)
-            /model nemotron → Nemotron 3 Nano 30B (FREE, OpenRouter)
-            /model qwen     → (legacy) self-hosted Qwen via GCP IP
-            /model phi      → (legacy) self-hosted Phi-4 via ngrok
-        """
+        """Switch between model backends."""
         model_file = Path.home() / ".redclaw" / "active_model.txt"
         ip_file = Path.home() / ".redclaw" / "model_ip.txt"
         link_file = Path.home() / ".redclaw" / "link.txt"
 
-        # ── Model profiles ──
         profiles = {
-            "gemini": {
-                "display": "Gemini 2.5 Flash",
-                "model_name": "gemini-2.5-flash",
-                "endpoint": "https://generativelanguage.googleapis.com/v1beta/openai",
-                "source": "Google AI API",
-                "icon": "🔵",
-                "needs_key": True,
-            },
-            "openai": {
-                "display": "GPT-4o-mini",
-                "model_name": "gpt-4o-mini",
-                "endpoint": "https://api.openai.com/v1",
-                "source": "OpenAI API",
-                "icon": "🟢",
-                "needs_key": True,
-            },
-            "groq": {
-                "display": "Llama 3.3 70B",
-                "model_name": "llama-3.3-70b-versatile",
-                "endpoint": "https://api.groq.com/openai/v1",
-                "source": "Groq API",
-                "icon": "🟠",
-                "needs_key": True,
-            },
-            "openrouter": {
-                "display": "Qwen 2.5 Coder 32B",
-                "model_name": "qwen/qwen-2.5-coder-32b-instruct",
-                "endpoint": "https://openrouter.ai/api/v1",
-                "source": "OpenRouter API",
-                "icon": "🟣",
-                "needs_key": True,
-            },
-            "gpt-oss": {
-                "display": "GPT-OSS 120B (FREE)",
-                "model_name": "openai/gpt-oss-120b:free",
-                "endpoint": "https://openrouter.ai/api/v1",
-                "source": "OpenRouter (Free)",
-                "icon": "🟢",
-                "needs_key": True,
-            },
-            "dolphin": {
-                "display": "Dolphin Mistral 24B (FREE)",
-                "model_name": "cognitivecomputations/dolphin-mistral-24b-venice-edition:free",
-                "endpoint": "https://openrouter.ai/api/v1",
-                "source": "OpenRouter (Free)",
-                "icon": "🐬",
-                "needs_key": True,
-            },
-            "nemotron": {
-                "display": "Nemotron 3 Nano 30B (FREE)",
-                "model_name": "nvidia/nemotron-3-nano-30b-a3b:free",
-                "endpoint": "https://openrouter.ai/api/v1",
-                "source": "OpenRouter (Free)",
-                "icon": "🟩",
-                "needs_key": True,
-            },
-            "qwen": {
-                "display": "Qwen2.5-Coder-32B (self-hosted)",
-                "model_name": "qwen-coder",
-                "source": "GCP Compute Engine (IP)",
-                "icon": "⚪",
-                "needs_key": False,
-            },
-            "phi": {
-                "display": "Phi-4 (self-hosted)",
-                "model_name": "phi-4",
-                "source": "Kaggle (ngrok tunnel)",
-                "icon": "⚪",
-                "needs_key": False,
-            },
+            "gemini": {"display": "Gemini 2.5 Flash", "model_name": "gemini-2.5-flash", "endpoint": "https://generativelanguage.googleapis.com/v1beta/openai", "source": "Google AI API", "icon": "🔵", "needs_key": True},
+            "openai": {"display": "GPT-4o-mini", "model_name": "gpt-4o-mini", "endpoint": "https://api.openai.com/v1", "source": "OpenAI API", "icon": "🟢", "needs_key": True},
+            "groq": {"display": "Llama 3.3 70B", "model_name": "llama-3.3-70b-versatile", "endpoint": "https://api.groq.com/openai/v1", "source": "Groq API", "icon": "🟠", "needs_key": True},
+            "openrouter": {"display": "Qwen 2.5 Coder 32B", "model_name": "qwen/qwen-2.5-coder-32b-instruct", "endpoint": "https://openrouter.ai/api/v1", "source": "OpenRouter API", "icon": "🟣", "needs_key": True},
+            "gpt-oss": {"display": "GPT-OSS 120B (FREE)", "model_name": "openai/gpt-oss-120b:free", "endpoint": "https://openrouter.ai/api/v1", "source": "OpenRouter (Free)", "icon": "🟢", "needs_key": True},
+            "dolphin": {"display": "Dolphin Mistral 24B (FREE)", "model_name": "cognitivecomputations/dolphin-mistral-24b-venice-edition:free", "endpoint": "https://openrouter.ai/api/v1", "source": "OpenRouter (Free)", "icon": "🐬", "needs_key": True},
+            "nemotron": {"display": "Nemotron 3 Nano 30B (FREE)", "model_name": "nvidia/nemotron-3-nano-30b-a3b:free", "endpoint": "https://openrouter.ai/api/v1", "source": "OpenRouter (Free)", "icon": "🟩", "needs_key": True},
+            "qwen": {"display": "Qwen2.5-Coder-32B (self-hosted)", "model_name": "qwen-coder", "source": "GCP", "icon": "⚪", "needs_key": False},
+            "phi": {"display": "Phi-4 (self-hosted)", "model_name": "phi-4", "source": "Kaggle", "icon": "⚪", "needs_key": False},
         }
 
         if not args:
-            # Show current model
-            active = "gemini"  # default
+            active = "gemini"
             if model_file.exists():
                 active = model_file.read_text().strip().lower()
-
             profile = profiles.get(active, profiles["gemini"])
-
-            # Show saved endpoints
-            current_endpoint = None
-            if self._runtime:
-                status = self._runtime.get_status()
-                current_endpoint = status.get("llm_endpoint")
-
-            # Check API key
             key_file = Path.home() / ".redclaw" / "api_key.txt"
             has_key = key_file.exists() and key_file.read_text().strip()
-
             lines = [
                 f"[info]Active Model[/]:   {profile['icon']} {profile['display']}",
                 f"[info]Model Name[/]:     {profile['model_name']}",
                 f"[info]Source[/]:          {profile['source']}",
-                f"[info]Endpoint[/]:        {current_endpoint or profile.get('endpoint', '[dim]not set[/]')}",
                 f"[info]API Key[/]:         {'✅ Set' if has_key else '❌ Not set — use /apikey <key>'}",
                 "",
                 "[dim]API Providers:[/]   gemini | openai | groq | openrouter",
@@ -1011,107 +769,100 @@ class RedClawCLI:
                 "",
                 "[dim]Switch: /model <name>[/]",
             ]
-
-            self._console.print(Panel(
-                "\n".join(lines),
-                title="[bold]Model Configuration[/]",
-                border_style="red",
-            ))
+            self._console.print(Panel("\n".join(lines), title="[bold]Model Configuration[/]", border_style="red"))
             return
 
-        # ── Switch model ──
         choice = args[0].strip().lower()
-
         if choice not in profiles:
-            available = ", ".join(profiles.keys())
-            self._console.print(
-                f"[error]Unknown model: '{choice}'. Available: {available}[/]"
-            )
+            self._console.print(f"[error]Unknown model: '{choice}'. Available: {', '.join(profiles.keys())}[/]")
             return
 
         profile = profiles[choice]
-
-        # Determine endpoint based on model choice
         if "endpoint" in profile:
-            # API provider — use built-in endpoint
             new_url = profile["endpoint"]
         elif choice == "qwen":
-            # Legacy: Use saved IP or default
-            if ip_file.exists():
-                saved_ip = ip_file.read_text().strip()
-                new_url = f"http://{saved_ip}" if not saved_ip.startswith("http") else saved_ip
-            else:
-                new_url = "http://35.223.143.247:8002"
-                self._console.print(
-                    "[dim]No saved IP. Using default. Set with /ip_m <ip>[/]"
-                )
-        else:  # phi
-            if link_file.exists():
-                new_url = link_file.read_text().strip()
-            else:
-                new_url = "https://placeholder.ngrok-free.app"
-                self._console.print(
-                    "[warning]⚠\ufe0f No ngrok URL saved. Set with /link <url>[/]"
-                )
+            new_url = f"http://{ip_file.read_text().strip()}" if ip_file.exists() else "http://35.223.143.247:8002"
+        else:
+            new_url = link_file.read_text().strip() if link_file.exists() else "https://placeholder.ngrok-free.app"
 
-        # Warn if API key needed but not set
-        if profile.get("needs_key"):
-            key_file = Path.home() / ".redclaw" / "api_key.txt"
-            has_key = (
-                os.environ.get("REDCLAW_LLM_KEY")
-                or (key_file.exists() and key_file.read_text().strip())
-            )
-            if not has_key:
-                self._console.print(
-                    f"[warning]⚠\ufe0f {profile['display']} requires an API key. Set with /apikey <key>[/]"
-                )
-
-        model_name = profile["model_name"]
-
-        # Save active model choice
         model_file.parent.mkdir(parents=True, exist_ok=True)
         model_file.write_text(choice)
-
-        # Update environment
         os.environ["REDCLAW_LLM_URL"] = new_url
-        os.environ["REDCLAW_LLM_MODEL"] = model_name
+        os.environ["REDCLAW_LLM_MODEL"] = profile["model_name"]
 
-        # Hot-reload runtime
         if self._runtime:
             self._runtime._config.llm_endpoint = new_url
-            self._runtime._config.llm_model = model_name
-            try:
-                import asyncio
-                health = asyncio.run(self._runtime.initialize())
-                reachable = health.get("status") == "ready"
-                if reachable:
-                    self._console.print(
-                        f"[success]✅ Switched to {profile['icon']} {profile['display']}:[/]\n"
-                        f"   [info]Model: {model_name}[/]\n"
-                        f"   [info]Endpoint: {new_url}[/]\n"
-                        f"   [success]🟢 Connected![/]"
-                    )
-                else:
-                    self._console.print(
-                        f"[warning]⚠️  Switched to {profile['display']} but unreachable:[/]\n"
-                        f"   [info]{new_url}[/]\n"
-                        f"   [warning]🟡 Check {'GCP VM' if choice == 'qwen' else 'ngrok tunnel'}[/]"
-                    )
-            except Exception:
-                self._console.print(
-                    f"[success]✅ Switched to {profile['display']}:[/]\n"
-                    f"   [info]Endpoint: {new_url}[/]"
-                )
-        else:
-            self._console.print(
-                f"[success]✅ Model set to {profile['display']}:[/]\n"
-                f"   [info]{new_url}[/]\n"
-                f"   [dim]Will take effect on next task[/]"
-            )
+            self._runtime._config.llm_model = profile["model_name"]
+
+        self._console.print(f"[success]✅ Switched to {profile['icon']} {profile['display']}[/]\n   [info]Endpoint: {new_url}[/]")
+
+    # ── NEW: LLM Reliability Monitoring Commands ─────────────────────────
+
+    def _cmd_monitor(self, args: list[str]) -> None:
+        """LLM reliability dashboard."""
+        if not self._llm_client:
+            self._console.print("[warning]LLM Client not initialized. No monitoring data.[/]")
+            return
+        report = self._llm_client.get_health_report()
+        health = report.get("health", {})
+        cost = report.get("cost", {})
+
+        table = Table(title="LLM Reliability Dashboard", border_style="red")
+        table.add_column("Metric", style="bold")
+        table.add_column("Value")
+        table.add_row("Success Rate", str(health.get("success_rate", "N/A")))
+        table.add_row("Avg Latency", str(health.get("avg_latency", "N/A")))
+        table.add_row("Total Calls", str(health.get("total_calls", 0)))
+        table.add_row("Total Errors", str(health.get("total_errors", 0)))
+        table.add_row("Total Cost", str(cost.get("total_cost", "$0.0000")))
+        table.add_row("Budget Remaining", str(cost.get("budget_remaining", "unlimited")))
+        self._console.print(table)
+
+        last = report.get("last_call", {})
+        if last:
+            self._console.print(f"  [dim]Last call: {last.get('model', '?')} ({last.get('latency', '?')}) — {'✅' if last.get('success') else '❌'}[/]")
+
+    def _cmd_providers(self, args: list[str]) -> None:
+        """Show provider failover chain."""
+        if not self._llm_client:
+            self._console.print("[warning]LLM Client not initialized.[/]")
+            return
+        report = self._llm_client.get_health_report()
+        providers = report.get("providers", [])
+        table = Table(title="Provider Failover Chain", border_style="cyan")
+        table.add_column("#", style="dim")
+        table.add_column("Model", style="bold")
+        table.add_column("Description")
+        table.add_column("Priority")
+        table.add_column("RPM Limit")
+        for i, p in enumerate(providers, 1):
+            table.add_row(str(i), p["model"], p.get("description", ""), str(p["priority"]), str(p.get("rpm_limit", "?")))
+        self._console.print(table)
+
+    def _cmd_budget(self, args: list[str]) -> None:
+        """Show cost tracking."""
+        if not self._llm_client:
+            self._console.print("[warning]LLM Client not initialized.[/]")
+            return
+        summary = self._llm_client.cost_tracker.get_summary()
+        table = Table(title="LLM Cost Tracking", border_style="yellow")
+        table.add_column("Metric", style="bold")
+        table.add_column("Value")
+        table.add_row("Total Cost", str(summary["total_cost"]))
+        table.add_row("Total Requests", str(summary["total_requests"]))
+        table.add_row("Input Tokens", str(summary["total_input_tokens"]))
+        table.add_row("Output Tokens", str(summary["total_output_tokens"]))
+        table.add_row("Budget Remaining", str(summary["budget_remaining"]))
+        self._console.print(table)
+        by_model = summary.get("by_model", {})
+        if by_model:
+            self._console.print("\n[dim]Cost by model:[/]")
+            for model, cost in by_model.items():
+                self._console.print(f"  {model}: {cost}")
 
     def _cmd_clear(self, args: list[str]) -> None:
         self._console.clear()
-        self._console.print(BANNER)
+        self._show_welcome()
 
     def _cmd_quit(self, args: list[str]) -> None:
         self._console.print("[dim]Shutting down RedClaw...[/]")
@@ -1134,7 +885,6 @@ class RedClawCLI:
             )
             return
 
-        # Build context from current state
         context = {}
         if self._state:
             state = self._state.state
@@ -1146,7 +896,6 @@ class RedClawCLI:
             try:
                 cfg = self._config._config
                 context["targets"] = list(cfg.targets.include)
-                context["scope"] = list(cfg.targets.include)
             except Exception:
                 pass
 
@@ -1154,30 +903,23 @@ class RedClawCLI:
             async for msg in self._runtime.run_task(text, context=context):
                 if msg.role == "system":
                     content = msg.content
-                    # Clean up error messages for user display
                     if "All LLM providers failed" in content or "LLM error" in content:
-                        # Detect rate limiting vs connection failure
                         is_rate_limit = "Rate limited" in content or "429" in content
                         if is_rate_limit:
                             self._console.print(
                                 "\n[warning]⚠️  Rate limited by provider.[/]\n"
-                                "[dim]  Free models have strict rate limits.\n"
-                                "  Wait a moment or switch: /model gemini[/]"
+                                "[dim]  Wait a moment or switch: /model gemini[/]"
                             )
                         else:
                             self._console.print(
                                 "\n[error]❌ Cannot reach LLM backend.[/]\n"
-                                "[warning]  Check:[/]\n"
-                                "  • API key set? → /apikey\n"
-                                "  • Model reachable? → /agent\n"
-                                "  • Try switching: /model gemini\n"
+                                "[dim]  Check: /apikey, /model, /agent[/]"
                             )
                     else:
                         self._console.print(f"  [phase]{content}[/]")
                 elif msg.role == "thinking":
                     self._console.print(f"  [tool]{msg.content}[/]")
                 elif msg.role == "tool":
-                    # Show tool result summary
                     tool_name = msg.metadata.get("tool", "?")
                     success = msg.metadata.get("success", False)
                     icon = "✓" if success else "✗"
@@ -1188,7 +930,6 @@ class RedClawCLI:
                     )
                 elif msg.role == "assistant":
                     if msg.is_final:
-                        # Final answer — render as rich markdown
                         self._console.print()
                         self._console.print(Panel(
                             Markdown(msg.content),
@@ -1201,72 +942,36 @@ class RedClawCLI:
                                 f"{meta.get('total_time', '?')})[/]"
                             )
                     else:
-                        # Intermediate thinking
                         self._console.print(f"  [agent]◆[/] {msg.content[:500]}")
 
         try:
             asyncio.run(_run())
         except Exception as e:
             err_str = str(e)
-            if "All LLM providers failed" in err_str or "LLM" in err_str or "Rate limited" in err_str:
-                is_rate_limit = "Rate limited" in err_str or "429" in err_str
-                if is_rate_limit:
-                    self._console.print(
-                        "\n[warning]⚠️  Rate limited by provider.[/]\n"
-                        "[dim]  Wait a moment or switch to a different model: /model gemini[/]"
-                    )
-                else:
-                    self._console.print(
-                        "\n[error]❌ Cannot reach LLM backend.[/]\n"
-                        "[dim]  Check: /apikey, /model, /agent[/]"
-                    )
+            if "Rate limited" in err_str or "429" in err_str:
+                self._console.print(
+                    "\n[warning]⚠️  Rate limited by provider.[/]\n"
+                    "[dim]  Wait a moment or switch: /model gemini[/]"
+                )
+            elif "LLM" in err_str or "provider" in err_str.lower():
+                self._console.print(
+                    "\n[error]❌ Cannot reach LLM backend.[/]\n"
+                    "[dim]  Check: /apikey, /model, /agent[/]"
+                )
             else:
                 self._console.print(f"[error]Agent error: {err_str[:200]}[/]")
 
-    # ── System status ─────────────────────────────────────────────────────
 
-    def _show_system_status(self) -> None:
-        """Show system status on startup — reflects REAL health."""
-        items = [
-            ("State Manager", self._state is not None),
-            ("Config Manager", self._config is not None),
-            ("GuardianRails", self._guardian is not None),
-        ]
-
-        table = Table(show_header=False, border_style="dim", pad_edge=False)
-        table.add_column("Component")
-        table.add_column("Status", justify="center")
-
-        for name, ready in items:
-            status = "[success]✓[/]" if ready else "[warning]○[/]"
-            table.add_row(name, status)
-
-        # OpenClaw Runtime — show REAL health
-        if self._runtime:
-            rt_status = self._runtime.get_status()
-            health = rt_status.get('health', 'not_initialized')
-            if health == 'ready':
-                table.add_row("OpenClaw Runtime", "[success]✓ Ready[/]")
-            elif health == 'degraded':
-                table.add_row("OpenClaw Runtime", "[warning]⚠ Degraded (LLM unreachable)[/]")
-            else:
-                table.add_row("OpenClaw Runtime", "[error]✗ Not initialized[/]")
-
-            # Show endpoint being used
-            table.add_row("LLM Endpoint", f"[dim]{rt_status.get('llm_endpoint', '?')}[/]")
-        else:
-            table.add_row("OpenClaw Runtime", "[error]✗ Missing[/]")
-
-        self._console.print(Panel(table, title="System Status", border_style="red"))
+# ══════════════════════════════════════════════════════════════════════════════
+# Runtime Builder + Entry Point (preserved from original)
+# ══════════════════════════════════════════════════════════════════════════════
 
 
 def _build_runtime():
     """Build the full runtime stack with ToolBridge wired to all MCP servers."""
-    import os
     from ..openclaw_bridge.runtime import OpenClawRuntime, RuntimeConfig
     from ..openclaw_bridge.tool_bridge import ToolBridge
     from ..core.guardian import GuardianRails
-    # Original 10 MCP servers
     from ..mcp_servers.nmap_server import NmapServer
     from ..mcp_servers.masscan_server import MasscanServer
     from ..mcp_servers.nuclei_server import NucleiServer
@@ -1276,18 +981,15 @@ def _build_runtime():
     from ..mcp_servers.bloodhound_server import BloodHoundServer
     from ..mcp_servers.peas_servers import LinPEASServer, WinPEASServer
     from ..mcp_servers.custom_exploit_server import CustomExploitServer
-    # New agentic core tools (3 servers, 6 tools)
     from ..mcp_servers.terminal_server import TerminalServer
     from ..mcp_servers.agent_control_server import AgentControlServer
     from ..mcp_servers.file_server import FileServer
 
-    # ── Load active model profile from ~/.redclaw/active_model.txt ──────────
     model_file = Path.home() / ".redclaw" / "active_model.txt"
-    active_model = "gemini"  # default
+    active_model = "gemini"
     if model_file.exists():
         active_model = model_file.read_text().strip().lower()
 
-    # ── Provider endpoint table (mirrors /model profiles) ────────────────
     provider_table = {
         "gemini":     ("gemini-2.5-flash", "https://generativelanguage.googleapis.com/v1beta/openai"),
         "openai":     ("gpt-4o-mini", "https://api.openai.com/v1"),
@@ -1305,7 +1007,6 @@ def _build_runtime():
         link_file = Path.home() / ".redclaw" / "link.txt"
         default_url = link_file.read_text().strip() if link_file.exists() else "https://placeholder.ngrok-free.app"
     else:
-        # Legacy qwen (self-hosted)
         model_name = "qwen-coder"
         ip_file = Path.home() / ".redclaw" / "model_ip.txt"
         link_file = Path.home() / ".redclaw" / "link.txt"
@@ -1319,79 +1020,53 @@ def _build_runtime():
     os.environ.setdefault("REDCLAW_LLM_URL", default_url)
     os.environ.setdefault("REDCLAW_LLM_MODEL", model_name)
 
-    # Config — API key auto-loaded from env/file by RuntimeConfig.__post_init__
     config = RuntimeConfig(
         llm_endpoint=os.environ.get("REDCLAW_LLM_URL", default_url),
         llm_model=os.environ.get("REDCLAW_LLM_MODEL", model_name),
     )
 
-    # Create guardian
     guardian = GuardianRails()
-
-    # Create runtime
     runtime = OpenClawRuntime(config)
 
-    # Create and wire ToolBridge with all MCP servers (13 total)
     bridge = ToolBridge(guardian=guardian)
     bridge.register_servers({
-        # ── Scanning & Recon ──
-        "nmap": NmapServer(),
-        "masscan": MasscanServer(),
-        "nuclei": NucleiServer(),
-        # ── Exploitation ──
-        "metasploit": MetasploitServer(),
-        "sqlmap": SQLMapServer(),
-        "hydra": HydraServer(),
-        "custom_exploit": CustomExploitServer(),
-        # ── Post-Exploitation ──
-        "bloodhound": BloodHoundServer(),
-        "linpeas": LinPEASServer(),
-        "winpeas": WinPEASServer(),
-        # ── Agentic Core (NEW) ──
-        "terminal": TerminalServer(),
-        "agent_control": AgentControlServer(),
-        "file_ops": FileServer(),
+        "nmap": NmapServer(), "masscan": MasscanServer(), "nuclei": NucleiServer(),
+        "metasploit": MetasploitServer(), "sqlmap": SQLMapServer(),
+        "hydra": HydraServer(), "custom_exploit": CustomExploitServer(),
+        "bloodhound": BloodHoundServer(), "linpeas": LinPEASServer(), "winpeas": WinPEASServer(),
+        "terminal": TerminalServer(), "agent_control": AgentControlServer(), "file_ops": FileServer(),
     })
     runtime.register_tool_bridge(bridge)
 
-    # ── Eagerly initialize OpenClaw so /status shows Ready ─────────────────
-    import asyncio
     try:
         asyncio.run(runtime.initialize())
     except Exception:
-        # If initialize fails, that's OK — runtime will retry on first task
         pass
 
-    return runtime, guardian, config
+    # Build LLM Client with provider failover
+    from ..router.llm_client import LLMClient
+    llm_client = LLMClient()
+    llm_client.add_providers_from_env()
+
+    return runtime, guardian, config, llm_client
 
 
 def main() -> None:
     """Entry point for the CLI."""
-    # ── Logging: console + file during TESTING phase ──────────────────────
-    # TODO: When testing is complete, switch to file-only logging to hide
-    # internal logs from end users. For now, keep console output so errors
-    # are visible during development/debugging.
     log_dir = Path.home() / ".redclaw" / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     log_file = log_dir / "redclaw.log"
 
-    # Console handler (visible to user — needed during testing)
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
     )
-
-    # Also log to file for persistent debugging
     file_handler = logging.FileHandler(log_file, encoding="utf-8")
     file_handler.setLevel(logging.DEBUG)
-    file_handler.setFormatter(logging.Formatter(
-        "%(asctime)s [%(name)s] %(levelname)s: %(message)s"
-    ))
+    file_handler.setFormatter(logging.Formatter("%(asctime)s [%(name)s] %(levelname)s: %(message)s"))
     logging.getLogger().addHandler(file_handler)
 
-    # ── Zero-touch bootstrap: auto-setup on first run ─────────────────────
-    # Runs doctor + installs missing tools + installs Claude Code CLI.
-    # Subsequent launches fast-path via marker file (~/.redclaw/.initialized).
+    # Bootstrap
     try:
         from ..core.bootstrap import ensure_ready
         bootstrap_status = ensure_ready(quiet=False)
@@ -1403,26 +1078,16 @@ def main() -> None:
     if len(sys.argv) > 1:
         subcmd = sys.argv[1].lower()
 
-        # `redclaw proxy` — start the reverse proxy
         if subcmd == "proxy":
             from ..proxy.server import start_proxy
-            import os
-            backend = (
-                sys.argv[2] if len(sys.argv) > 2
-                else os.environ.get(
-                    "REDCLAW_LLM_URL",
-                    "https://0b2f-34-29-72-116.ngrok-free.app"
-                )
-            )
+            backend = sys.argv[2] if len(sys.argv) > 2 else os.environ.get("REDCLAW_LLM_URL", "https://0b2f-34-29-72-116.ngrok-free.app")
             port = int(sys.argv[3]) if len(sys.argv) > 3 else 8080
             start_proxy(backend_url=backend, port=port)
             return
 
-        # `redclaw agent <task>` — one-shot agent task
         if subcmd == "agent":
             task = " ".join(sys.argv[2:]) if len(sys.argv) > 2 else "Run a health check"
-            runtime, guardian, _ = _build_runtime()
-
+            runtime, guardian, _, llm_client = _build_runtime()
             async def _run():
                 await runtime.initialize()
                 async for msg in runtime.run_task(task):
@@ -1441,44 +1106,31 @@ def main() -> None:
                             print(f"{'='*60}")
                         else:
                             print(f"  > {msg.content[:300]}")
-
             asyncio.run(_run())
             return
 
-        # `redclaw pentest <target>` — full autonomous pentest (non-interactive)
         if subcmd == "pentest":
             target = sys.argv[2] if len(sys.argv) > 2 else None
             if not target:
                 print("Usage: redclaw pentest <TARGET_IP>")
-                print("Example: python -m redclaw pentest 192.168.1.83")
                 sys.exit(1)
-
-            api_key = os.environ.get(
-                "OPENROUTER_API_KEY",
-                os.environ.get("REDCLAW_LLM_KEY", "")
-            )
-
+            api_key = os.environ.get("OPENROUTER_API_KEY", os.environ.get("REDCLAW_LLM_KEY", ""))
             async def _run_pentest():
                 from ..pentest import RedClawPentest
                 pentest = RedClawPentest(target=target, api_key=api_key)
                 await pentest.run()
-
             asyncio.run(_run_pentest())
             return
 
-        # `redclaw skin` — launch Claude Code with RedClaw skin
         if subcmd == "skin":
             from ..claude_skin.launcher import ClaudeCodeLauncher
             targets = sys.argv[2:] if len(sys.argv) > 2 else []
             launcher = ClaudeCodeLauncher(targets=targets)
-            exit_code = launcher.launch()
-            sys.exit(exit_code)
+            sys.exit(launcher.launch())
 
-        # `redclaw doctor` — health-check all tools
         if subcmd == "doctor":
             from rich.console import Console as RichConsole
             console = RichConsole(theme=REDCLAW_THEME)
-            console.print(BANNER)
             try:
                 from ..tooling.doctor import DoctorReport
                 doctor = DoctorReport()
@@ -1487,11 +1139,9 @@ def main() -> None:
                 console.print(f"[error]Doctor failed: {e}[/]")
             return
 
-        # `redclaw setup-tools` — auto-install missing tools
         if subcmd in ("setup-tools", "setup_tools"):
             from rich.console import Console as RichConsole
             console = RichConsole(theme=REDCLAW_THEME)
-            console.print(BANNER)
             mode = sys.argv[2] if len(sys.argv) > 2 else "interactive"
             try:
                 from ..tooling.installer import ToolInstaller
@@ -1513,9 +1163,8 @@ def main() -> None:
     from ..core.config import ConfigManager
     from ..core.state import StateManager
 
-    runtime, guardian, _ = _build_runtime()
+    runtime, guardian, _, llm_client = _build_runtime()
 
-    # Attempt to load engagement config
     config = None
     config_candidates = ["engagement.yaml", "engagement.yml", "redclaw.yaml"]
     for candidate in config_candidates:
@@ -1533,6 +1182,7 @@ def main() -> None:
         state_manager=state,
         runtime=runtime,
         guardian=guardian,
+        llm_client=llm_client,
     )
     cli.run()
 

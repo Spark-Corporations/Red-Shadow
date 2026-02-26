@@ -8,6 +8,9 @@ Components:
   - ModelAlloyRouter: High-level router combining all components
 
 Target Distribution: 60% openai/gpt-oss-120b:free (reasoning) + 40% qwen/qwen3-coder:free (coding)
+
+NEW: Integrates with LLMClient for provider failover — if primary model fails,
+ModelAlloyRouter will retry through the LLMClient failover chain before giving up.
 """
 
 from __future__ import annotations
@@ -261,11 +264,16 @@ class ModelAlloyRouter:
     """
     High-level Model Alloy router combining all components.
 
-    Usage:
-        from redclaw.router import OpenRouterClient, ModelAlloyRouter
+    Now supports LLMClient failover: if the primary model fails,
+    the router will attempt a fallback through the LLMClient provider chain.
 
-        client = OpenRouterClient(api_key="sk-or-...")
-        router = ModelAlloyRouter(client)
+    Usage:
+        from redclaw.router import OpenRouterClient, ModelAlloyRouter, LLMClient
+
+        llm_client = LLMClient()
+        llm_client.add_providers_from_env()
+        client = OpenRouterClient(api_key="sk-or-...", llm_client=llm_client)
+        router = ModelAlloyRouter(client, llm_client=llm_client)
 
         result = await router.execute_task({
             "id": "scan_1",
@@ -273,15 +281,17 @@ class ModelAlloyRouter:
         })
     """
 
-    def __init__(self, client, target_ratio: float = TARGET_BRAIN_RATIO):
+    def __init__(self, client, target_ratio: float = TARGET_BRAIN_RATIO, llm_client=None):
         """
         Args:
             client: OpenRouterClient instance
             target_ratio: Target brain/total ratio (default 0.6)
+            llm_client: Optional LLMClient for provider failover
         """
         self.client = client
         self.balanced_router = BalancedRouter(target_ratio)
         self.performance_tracker = ModelPerformanceTracker()
+        self._llm_client = llm_client
 
     async def execute_task(
         self,
@@ -346,6 +356,30 @@ class ModelAlloyRouter:
             logger.error(f"Task {task_id} failed on {model}: {e}")
             if model != "BOTH":
                 self.performance_tracker.record(model, False)
+
+            # ── LLMClient failover: try alternate provider ──────────────
+            if self._llm_client and model != "BOTH":
+                try:
+                    logger.info(f"Task {task_id}: primary model {model} failed, trying LLMClient failover...")
+                    fallback_result = await self._llm_client.chat(
+                        messages=[
+                            {"role": "system", "content": "You are a security expert."},
+                            {"role": "user", "content": description},
+                        ],
+                    )
+                    fallback_content = fallback_result.get("content", "")
+                    fallback_model = fallback_result.get("model", "fallback")
+                    logger.info(f"Task {task_id}: failover succeeded via {fallback_model}")
+                    return {
+                        "model": fallback_model,
+                        "result": fallback_content,
+                        "success": True,
+                        "task_id": task_id,
+                        "failover": True,
+                    }
+                except Exception as fe:
+                    logger.error(f"Task {task_id}: LLMClient failover also failed: {fe}")
+
             return {
                 "model": model,
                 "result": "",

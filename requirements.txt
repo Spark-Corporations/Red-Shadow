@@ -1,4 +1,4 @@
-# RedClaw v2.0 — Python Dependencies
+# RedClaw v3.1 — Python Dependencies
 # Install: pip install -r requirements.txt
 # Or just: pip install -e .  (reads from pyproject.toml)
 
@@ -12,3 +12,7 @@ msgpack>=1.0.7
 psutil>=5.9.8
 aiohttp>=3.9.3
 pydantic>=2.6.0
+
+# LLM Reliability Layer (CAI/PentAGI-inspired)
+litellm>=1.50.0
+tiktoken>=0.7.0
