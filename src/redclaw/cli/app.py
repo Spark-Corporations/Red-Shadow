@@ -70,14 +70,15 @@ BANNER = r"""
   ██╔══██╗██╔══╝  ██║  ██║██║     ██║     ██╔══██║██║███╗██║
   ██║  ██║███████╗██████╔╝╚██████╗███████╗██║  ██║╚███╔███╔╝
   ╚═╝  ╚═╝╚══════╝╚═════╝  ╚═════╝╚══════╝╚═╝  ╚═╝ ╚══╝╚══╝[/]
-[dim white]  v2.0.0 "Red Shadow" — Autonomous Penetration Testing Agent
-  Powered by OpenClaw Runtime + Kaggle Phi-4[/]
+[dim white]  v3.1.0 "Red Shadow" — Autonomous Penetration Testing Platform
+  Powered by OpenRouter (Brain + Hands) + Zero-Day Hunter[/]
 """
 
 # ── Slash Commands ────────────────────────────────────────────────────────────
 
 SLASH_COMMANDS = {
     "/help": "Show available commands",
+    "/pentest": "Full autonomous pentest (scan -> exploit -> zero-day -> report)",
     "/status": "Show pipeline and agent status",
     "/config": "Show current engagement configuration",
     "/scan": "Start a scan on configured targets",
@@ -89,7 +90,7 @@ SLASH_COMMANDS = {
     "/guardian": "Show GuardianRails statistics",
     "/checkpoint": "Save current state to disk",
     "/resume": "Resume from last checkpoint",
-    "/proxy": "Start the Anthropic→OpenAI reverse proxy",
+    "/proxy": "Start the Anthropic->OpenAI reverse proxy",
     "/agent": "Show agent loop stats and LLM provider health",
     "/skin": "Launch Claude Code with RedClaw pentesting skin",
     "/doctor": "Health-check all tool dependencies",
@@ -185,6 +186,7 @@ class RedClawCLI:
 
         handlers = {
             "/help": self._cmd_help,
+            "/pentest": self._cmd_pentest,
             "/status": self._cmd_status,
             "/config": self._cmd_config,
             "/scan": self._cmd_scan,
@@ -223,6 +225,70 @@ class RedClawCLI:
         for cmd, desc in SLASH_COMMANDS.items():
             table.add_row(cmd, desc)
         self._console.print(table)
+
+    def _cmd_pentest(self, args: list[str]) -> None:
+        """Run full autonomous pentest: scan -> exploit -> zero-day -> post-exploit -> report."""
+        target = args[0] if args else None
+        if not target:
+            self._console.print(
+                Panel(
+                    "[warning]Usage:[/] /pentest <target_ip>\n\n"
+                    "[dim]Example: /pentest 192.168.1.83[/]\n\n"
+                    "Runs the full 10-phase autonomous pentest pipeline:\n"
+                    "  1. Brain Planning\n"
+                    "  2. Port Scan (nmap or Python scanner)\n"
+                    "  3. KnowledgeGraph\n"
+                    "  4. Brain CVE Analysis\n"
+                    "  5. Hands Exploit Code Generation\n"
+                    "  6. Exploitation (FTP, HTTP, VNC, MySQL, etc.)\n"
+                    "  7. Zero-Day Hunting (fuzzing, protocol abuse)\n"
+                    "  8. Post-Exploitation\n"
+                    "  9. Brain Executive Summary\n"
+                    "  10. CausalChain Report\n",
+                    title="[bold red]Full Autonomous Pentest[/]",
+                    border_style="red",
+                )
+            )
+            return
+
+        # Approval prompt
+        self._console.print(
+            Panel(
+                f"[warning]TARGET:[/] [bold]{target}[/]\n\n"
+                "This will run the full autonomous pentest pipeline\n"
+                "including exploitation and zero-day hunting.\n\n"
+                "Type 'yes' to proceed.",
+                title="[bold red]Autonomous Pentest Confirmation[/]",
+                border_style="red",
+            )
+        )
+        try:
+            answer = input("Proceed? [yes/no] > ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            answer = "no"
+
+        if answer != "yes":
+            self._console.print("[dim]Pentest cancelled.[/]")
+            return
+
+        api_key = os.environ.get(
+            "OPENROUTER_API_KEY",
+            os.environ.get("REDCLAW_LLM_KEY", "")
+        )
+
+        self._console.print(f"\n[tool]Starting full pentest[/] on [bold]{target}[/]...")
+        self._console.print("[dim]All 10 phases will run autonomously.[/]\n")
+
+        async def _run_pentest():
+            from ..pentest import RedClawPentest
+            pentest = RedClawPentest(target=target, api_key=api_key)
+            await pentest.run()
+
+        try:
+            asyncio.run(_run_pentest())
+            self._console.print("\n[success]Pentest completed. Check ~/.redclaw/engagements/ for reports.[/]")
+        except Exception as e:
+            self._console.print(f"[error]Pentest failed: {e}[/]")
 
     def _cmd_status(self, args: list[str]) -> None:
         panel_content = []
@@ -1364,9 +1430,9 @@ def main() -> None:
                     if role == "system":
                         print(f"[SYS] {msg.content}")
                     elif role == "thinking":
-                        print(f"  🔧 {msg.content}")
+                        print(f"  tool {msg.content}")
                     elif role == "tool":
-                        icon = "✓" if msg.metadata.get('success') else "✗"
+                        icon = "+" if msg.metadata.get('success') else "x"
                         print(f"  {icon} {msg.metadata.get('tool', '?')}: {msg.content[:200]}")
                     elif role == "assistant":
                         if msg.is_final:
@@ -1374,9 +1440,30 @@ def main() -> None:
                             print(msg.content)
                             print(f"{'='*60}")
                         else:
-                            print(f"  ◆ {msg.content[:300]}")
+                            print(f"  > {msg.content[:300]}")
 
             asyncio.run(_run())
+            return
+
+        # `redclaw pentest <target>` — full autonomous pentest (non-interactive)
+        if subcmd == "pentest":
+            target = sys.argv[2] if len(sys.argv) > 2 else None
+            if not target:
+                print("Usage: redclaw pentest <TARGET_IP>")
+                print("Example: python -m redclaw pentest 192.168.1.83")
+                sys.exit(1)
+
+            api_key = os.environ.get(
+                "OPENROUTER_API_KEY",
+                os.environ.get("REDCLAW_LLM_KEY", "")
+            )
+
+            async def _run_pentest():
+                from ..pentest import RedClawPentest
+                pentest = RedClawPentest(target=target, api_key=api_key)
+                await pentest.run()
+
+            asyncio.run(_run_pentest())
             return
 
         # `redclaw skin` — launch Claude Code with RedClaw skin
