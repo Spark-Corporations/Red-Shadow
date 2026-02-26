@@ -1,0 +1,21 @@
+{
+  "current_status": "RECON",
+  "completed_tasks": [],
+  "ongoing_tasks": [
+    {
+      "task_id": "nmap_scan",
+      "status": "RUNNING",
+      "details": "Scanning 192.168.1.83",
+      "timestamp": "2026-02-26T16:41:20.245788"
+    }
+  ],
+  "pending_tasks": [],
+  "failed_attempts": [],
+  "key_findings": [],
+  "next_planned": [],
+  "metadata": {
+    "engagement": "Pentest 192.168.1.83",
+    "started_at": "2026-02-26T16:41:14.727612",
+    "last_updated": "2026-02-26T16:41:20.245801"
+  }
+}

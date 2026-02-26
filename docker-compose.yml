@@ -1,76 +1,21 @@
-# ────────────────────────────────────────────────────────────────────────────
-# RedClaw v2.0 — Docker Compose
-# Services:
-#   - redclaw: Main pentesting agent container (Kali + all tools)
-#   - msf-db:  PostgreSQL database for Metasploit
-# ────────────────────────────────────────────────────────────────────────────
-
-version: "3.9"
+# RedClaw V3.1 - Docker Compose
+# Usage:
+#   docker compose up       -> Pentest DEFAULT_TARGET
+#   docker compose run redclaw <TARGET_IP>
 
 services:
-  # ── RedClaw Agent ─────────────────────────────────────────────────────
   redclaw:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: redclaw-agent
-    hostname: redclaw
-    stdin_open: true      # Interactive CLI requires stdin
-    tty: true             # Allocate pseudo-TTY for Rich output
-    ports:
-      - "8080:8080"       # Reverse proxy (Anthropic→OpenAI)
+    build: .
+    image: redclaw:3.1
+    container_name: redclaw-pentest
+    stdin_open: true
+    tty: true
     environment:
-      # LLM Configuration
-      - REDCLAW_LLM_URL=${REDCLAW_LLM_URL:-https://0b2f-34-29-72-116.ngrok-free.app}
-      - REDCLAW_LLM_MODEL=${REDCLAW_LLM_MODEL:-phi-4}
-      - REDCLAW_LLM_KEY=${REDCLAW_LLM_KEY:-}
-      - REDCLAW_LOG_LEVEL=${REDCLAW_LOG_LEVEL:-INFO}
-      # Metasploit DB connection
-      - MSF_DATABASE_URL=postgres://msf:msf_password@msf-db:5432/msf
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-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}
+      - DEFAULT_TARGET=${TARGET:-192.168.1.83}
     volumes:
-      # Persist engagement data between runs
-      - redclaw-data:/engagements
-      - redclaw-logs:/root/.redclaw/logs
-      # Mount custom exploits from host
-      - ./exploits:/engagements/exploits:ro
-    depends_on:
-      msf-db:
-        condition: service_healthy
-    networks:
-      - redclaw-net
-    # Override command for specific use cases:
-    # docker compose run redclaw doctor
-    # docker compose run redclaw proxy
-    # docker compose run redclaw agent "scan 10.10.10.5"
-
-  # ── Metasploit PostgreSQL Database ───────────────────────────────────
-  msf-db:
-    image: postgres:15-alpine
-    container_name: redclaw-msf-db
-    environment:
-      POSTGRES_USER: msf
-      POSTGRES_PASSWORD: msf_password
-      POSTGRES_DB: msf
-    volumes:
-      - msf-db-data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U msf"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    networks:
-      - redclaw-net
-
-# ── Volumes ────────────────────────────────────────────────────────────
-volumes:
-  redclaw-data:
-    driver: local
-  redclaw-logs:
-    driver: local
-  msf-db-data:
-    driver: local
-
-# ── Networks ───────────────────────────────────────────────────────────
-networks:
-  redclaw-net:
-    driver: bridge
+      # Persist engagement reports on host
+      - ./engagements:/root/.redclaw/engagements
+    network_mode: host   # Access local network targets
+    # Override CMD with target IP
+    command: ["${TARGET:-192.168.1.83}"]

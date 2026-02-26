@@ -1,14 +1,19 @@
-# ────────────────────────────────────────────────────────────────────────────
-# RedClaw v2.0 — Dockerfile
+# ============================================================
+# RedClaw V3.1 -- Dockerfile
 # Base: Kali Linux (all pentesting tools pre-installed)
-# Purpose: Containerized pentesting environment with all 10 tools bundled
-# ────────────────────────────────────────────────────────────────────────────
+# Purpose: Containerized autonomous pentest environment
+#
+# Build:  docker build -t redclaw .
+# Run:    docker run --rm -it -e OPENROUTER_API_KEY=sk-or-v1-... redclaw 192.168.1.83
+# Test:   docker run --rm -it redclaw --test
+# Shell:  docker run --rm -it --entrypoint bash redclaw
+# ============================================================
 
 FROM kalilinux/kali-rolling:latest
 
 LABEL maintainer="SparkStack Systems"
-LABEL description="RedClaw v2.0 — Autonomous Penetration Testing Agent"
-LABEL version="2.0.0"
+LABEL description="RedClaw V3.1 -- Autonomous Penetration Testing Agent"
+LABEL version="3.1.0"
 
 # ── System Setup ──────────────────────────────────────────────────────────
 ENV DEBIAN_FRONTEND=noninteractive
@@ -63,43 +68,49 @@ RUN mkdir -p /opt/peas && \
     chmod +x /opt/peas/linpeas.sh
 
 # 9. BloodHound — AD attack path analysis (Python collector)
-RUN pip3 install --no-cache-dir bloodhound 2>/dev/null || true
+RUN pip3 install --no-cache-dir --break-system-packages bloodhound 2>/dev/null || true
 
 # 10. Custom exploit support (Python dev tools)
-RUN pip3 install --no-cache-dir requests pwntools 2>/dev/null || true
+RUN pip3 install --no-cache-dir --break-system-packages requests pwntools 2>/dev/null || true
 
-# ── Install RedClaw ──────────────────────────────────────────────────────
+# -- Install RedClaw V3.1 -------------------------------------------------
 
 WORKDIR /opt/redclaw
 
-# Copy project files
-COPY requirements.txt .
-RUN pip3 install --no-cache-dir -r requirements.txt
+# Build dependencies for aiohttp C extensions
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3-pip python3-dev gcc \
+    && rm -rf /var/lib/apt/lists/*
 
+# Core Python dependencies (MUST succeed)
+RUN pip3 install --no-cache-dir --break-system-packages aiohttp networkx
+
+# Optional: requirements.txt
+COPY requirements.txt* ./
+RUN pip3 install --no-cache-dir --break-system-packages -r requirements.txt 2>/dev/null || true
+
+# Copy full project
 COPY . .
 
-# Install RedClaw package in development mode
-RUN pip3 install --no-cache-dir -e . 2>/dev/null || pip3 install --no-cache-dir .
+# Install RedClaw package
+RUN pip3 install --no-cache-dir --break-system-packages -e . 2>/dev/null || \
+    pip3 install --no-cache-dir --break-system-packages . 2>/dev/null || true
 
-# ── Environment ──────────────────────────────────────────────────────────
+# -- Environment -----------------------------------------------------------
 
-# Default LLM endpoint (override with docker-compose or -e)
-ENV REDCLAW_LLM_URL="https://0b2f-34-29-72-116.ngrok-free.app"
-ENV REDCLAW_LLM_MODEL="phi-4"
+ENV PYTHONPATH=/opt/redclaw/src
+ENV PYTHONIOENCODING=utf-8
 ENV REDCLAW_LOG_LEVEL="INFO"
 ENV PEAS_DIR="/opt/peas"
+# OPENROUTER_API_KEY must be provided at runtime via -e or .env
 
 # Working directory for engagements
-RUN mkdir -p /engagements
-WORKDIR /engagements
+RUN mkdir -p /root/.redclaw/engagements
 
-# Expose proxy port
-EXPOSE 8080
+# -- Entrypoint ------------------------------------------------------------
 
-# ── Entrypoint ───────────────────────────────────────────────────────────
-
-# Default: launch interactive CLI
-ENTRYPOINT ["python3", "-m", "redclaw.cli.app"]
-
-# Allow subcommands: `docker run redclaw doctor`, `docker run redclaw skin`
+# Autonomous pentest: docker run redclaw <TARGET_IP>
+# Tests:              docker run redclaw --test
+# Interactive CLI:    docker run --entrypoint python3 redclaw -m redclaw.cli.app
+ENTRYPOINT ["python3", "src/redclaw/pentest.py"]
 CMD []

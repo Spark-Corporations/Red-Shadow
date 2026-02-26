@@ -1,0 +1,30 @@
+# Git/IDE
+.git
+.gitignore
+.github
+.agents
+.gemini
+*.md
+LICENSE
+
+# Python caches
+__pycache__
+*.pyc
+*.pyo
+*.egg-info
+.pytest_cache
+.mypy_cache
+dist/
+build/
+
+# IDE
+.vscode
+.idea
+
+# Engagement data (mounted as volume)
+engagements/
+
+# Temp files
+*.log
+test_*.py
+run_pentest.py
