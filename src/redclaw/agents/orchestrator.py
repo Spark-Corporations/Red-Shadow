@@ -29,7 +29,7 @@ class PipelineOrchestrator:
     Orchestrates the full 8-phase pentesting pipeline.
 
     Flow:
-      Planning → Recon → Scanning → VulnAssess → Exploitation → PostExploit → Reporting → Cleanup
+      Planning -> Recon -> Scanning -> VulnAssess -> Exploitation -> PostExploit -> Reporting -> Cleanup
 
     Usage:
         orchestrator = PipelineOrchestrator(state_manager, runtime)

@@ -1,7 +1,7 @@
 """
 BaseAgent — Abstract base for phase-specific pentesting agents.
 
-Implements the ReAct loop: Observe → Think → Act → Evaluate
+Implements the ReAct loop: Observe -> Think -> Act -> Evaluate
 Each phase agent specializes this pattern for its domain.
 """
 
