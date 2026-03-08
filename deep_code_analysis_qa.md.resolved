@@ -1,0 +1,805 @@
+# RedClaw V3.1 — Deep Code Analysis Q&A
+
+> **Metodologiya:** Bu cavablar yalnız source kodun birbaşa analizindən əldə edilib. Heç bir [.md](file:///C:/Users/ASUS/.gemini/antigravity/brain/603b322f-b0bb-4f28-8ca0-d1935c033656/task.md) faylına güvənilməyib. Hər cavabda fayl yolu, sətir nömrəsi və actual kod snippet göstərilib.
+
+---
+
+## 📋 SECTION 1: LLM DECISION MAKING
+
+### Q1: LLM Call Flow — [phase_exploit()](file:///tmp/test_orchestrator.py#60-62) içində hypothesis LLM-ə necə verilir?
+
+**Cavab:** Hypothesis listə **birbaşa LLM-ə verilmir**. Əvəzinə, yalnız bir tək hypothesis LLM-ə sandbox exploit kodu yazmaq üçün göndərilir.
+
+#### Axın:
+
+```
+HypothesisEngine.generate() → hypothesis listəsi yaradılır
+     ↓
+ParallelExploitOrchestrator.run_all() → hər birini _test_single_hypothesis()-ə verir
+     ↓
+_test_single_hypothesis() → əvvəlcə direct socket test (LLM-siz)
+     ↓ (əgər uğursuzsa)
+_sandbox_llm_test() → LLM-ə tək bir hypothesis göndərilir
+```
+
+#### Actual LLM Prompt ([exploit_phase_agent.py#L530-L558](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/openclaw_bridge/exploit_phase_agent.py#L530-L558)):
+
+```python
+prompt = f"""Write a Python function `run_exploit(target, port)` that:
+1. Tests {hypothesis.target_service}:{hypothesis.version} on {self.target}:{hypothesis.port}
+2. Attack vector: {hypothesis.attack_vector}
+3. CVE: {hypothesis.cve}
+
+Requirements:
+- Return dict: {{"success": bool, "access_gained": bool, "output": str, "method": str}}
+- Use ONLY: socket, http.client, ftplib, telnetlib, urllib
+- No os.system(), no subprocess, no reverse shells
+- Timeout: 10 seconds max
+- Catch all exceptions
+
+FUNCTION SIGNATURE:
+def run_exploit(target: str, port: int) -> dict:
+"""
+```
+
+#### LLM Response Parse ([exploit_phase_agent.py#L592-L613](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/openclaw_bridge/exploit_phase_agent.py#L592-L613)):
+
+```python
+# 1. LLM cavabından Python kodu çıxarılır
+code_match = re.search(r"```python\s*(.*?)```", llm_response, re.S)
+code = code_match.group(1) if code_match else llm_response
+
+# 2. Təhlükəsizlik yoxlaması
+if any(banned in code for banned in ["os.system", "subprocess", "exec(", "eval("]):
+    return None
+
+# 3. Müvəqqəti fayla yazılır + subprocess ilə icra edilir
+with tempfile.NamedTemporaryFile(suffix=".py", mode="w", delete=False) as f:
+    f.write(code + f"\nresult = run_exploit('{self.target}', {hypothesis.port})\n"
+                    f"import json; print('EXPLOIT_RESULT:' + json.dumps(result))")
+```
+
+> **Nəticə:** LLM heç vaxt hypothesis **listəsini** görmür. Yalnız tək bir hypothesis-in service, version, CVE, port məlumatını alır və Python exploit kodu yazır.
+
+---
+
+### Q2: Tool Selection — LLM tool seçərkən necə qərar verir?
+
+**Cavab:** LLM **heç vaxt tool seçmir**. Tool seçimi 100% deterministikdir — [ToolScheduler](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/openclaw_bridge/tool_scheduler.py#181-450) pre-condition əsasında qərar verir.
+
+#### ToolScheduler Dependency Graph ([tool_scheduler.py#L71-L128](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/openclaw_bridge/tool_scheduler.py#L71-L128)):
+
+```python
+TOOL_DEPENDENCY_GRAPH = {
+    "nmap_scan": {
+        "pre": [],                                    # ← Heç bir pre-condition yoxdur
+        "post": ["open_ports", "services", "os_detection"],
+        "cmd": "nmap -sV -sC -O {target}",
+        "binary": "nmap",
+    },
+    "nuclei_scan": {
+        "pre": ["open_ports"],                        # ← nmap tamamlansa çalışır
+        "post": ["cve_matches", "nuclei_results"],
+    },
+    "gobuster_scan": {
+        "pre": ["http_confirmed"],                    # ← HTTP servisi varsa çalışır
+        "post": ["directories", "hidden_paths"],
+    },
+    "sqlmap_scan": {
+        "pre": ["http_confirmed", "directories"],     # ← gobuster + http lazımdır
+    },
+}
+```
+
+#### Pre-condition Check ([tool_scheduler.py#L233-L250](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/openclaw_bridge/tool_scheduler.py#L233-L250)):
+
+```python
+def get_ready_tools(self) -> List[str]:
+    ready = []
+    for tool_name, spec in self.tdg.items():
+        if tool_name in self.results:      continue  # artıq icra edilib
+        if tool_name in self._unavailable: continue  # binary yoxdur
+        pre = spec.get("pre", [])
+        if all(self.kg.has_capability(p) for p in pre):  # BÜTÜN pre-conditionlar KG-dədir
+            ready.append(tool_name)
+    return ready
+```
+
+> **Nəticə:** Function calling JSON schema **istifadə olunmur**. [ToolScheduler](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/openclaw_bridge/tool_scheduler.py#181-450) LLM-dən tamamilə müstəqildir — tool-ları KG capability flag-larına əsasən deterministik icra edir.
+
+---
+
+### Q3: Hypothesis → Exploit Path
+
+**Cavab:** [HypothesisEngine](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/openclaw_bridge/hypothesis_engine.py#149-364) hypothesis yaradır → [ParallelExploitOrchestrator](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/openclaw_bridge/parallel_exploit.py#129-321) onları prioritized queue-ya qoyur → hər hypothesis [_test_single_hypothesis()](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/openclaw_bridge/exploit_phase_agent.py#171-184)-ə göndərilir.
+
+#### Tam axın:
+
+```
+[exploit_phase_agent.py#L117-L167]
+
+async def execute(self):
+    # ── 1. KG-dən context yüklə ──
+    context = self._load_context_from_kg()
+
+    # ── 2. Hypothesis yarat ──
+    hypotheses = self.hypothesis_engine.generate(self.target)
+
+    # ── 3. Parallel icra et ──
+    orchestrator = ParallelExploitOrchestrator(max_concurrent=4)
+    parallel_result = await orchestrator.run_all(
+        hypotheses=hypotheses,
+        test_fn=self._test_single_hypothesis,    # ← hər hypothesis bura gedir
+        record_fn=self._record_result,
+    )
+```
+
+#### HypothesisEngine → Hypothesis yaratma ([hypothesis_engine.py#L130-L200](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/openclaw_bridge/hypothesis_engine.py#L130-L200)):
+
+```python
+def generate(self, target: str) -> List[Hypothesis]:
+    vulnerabilities = self.kg.get_vulnerabilities_for_host(target)
+    services = self.kg.get_services_for_host(target)
+
+    # Layer 1: CVE-based (yüksək confidence)
+    for vuln in vulnerabilities.get("vulnerabilities", []):
+        hypotheses.append(Hypothesis(
+            cve=vuln["cve"],
+            target_service=service_name,
+            confidence=0.80,       # ← CVE varsa yüksək
+        ))
+
+    # Layer 2: Service-based (aşağı confidence)
+    for svc in services.get("services", []):
+        # Port-a görə default exploit vector seçir
+        hypotheses.append(Hypothesis(
+            attack_vector="default_creds",
+            confidence=0.50,
+        ))
+
+    # Layer 3: Memory adjustment
+    recall = self.memory.recall(self.target)
+    for h in hypotheses:
+        adj = recall.get_confidence_adjustment(h.cve, h.target_service, h.version)
+        h.confidence += adj        # ← Keçmiş sessiya uğursuzsa confidence azalır
+```
+
+> **Nəticə:** Hypothesis → ExploitLoop yolu: [generate()](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/reporting/causal_chain.py#56-81) → [PriorityHypothesisQueue](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/openclaw_bridge/parallel_exploit.py#64-110) (max-heap, ən yüksək confidence birinci) → [_test_single_hypothesis()](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/openclaw_bridge/exploit_phase_agent.py#171-184) → direct test və ya LLM sandbox.
+
+---
+
+## 📋 SECTION 2: TOOL EXECUTION
+
+### Q4: ToolScheduler — [get_ready_tools()](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/openclaw_bridge/tool_scheduler.py#233-251) nəticəsi necə istifadə olunur?
+
+**Cavab:** [get_ready_tools()](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/openclaw_bridge/tool_scheduler.py#233-251) nəticəsi **LLM-ə verilmir**. Birbaşa `ToolScheduler.run()` daxilində istifadə olunur.
+
+#### Execution Loop ([tool_scheduler.py#L362-L415](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/openclaw_bridge/tool_scheduler.py#L362-L415)):
+
+```python
+async def run(self) -> Dict[str, ToolResult]:
+    while iteration < max_iterations:
+        # 1. Mümkün olmayan tool-ları skip et
+        for tool in self.get_skippable_tools():
+            self.results[tool] = ToolResult(status=ToolStatus.SKIPPED)
+
+        # 2. Hazır tool-ları tap
+        ready = self.get_ready_tools()
+        if not ready:
+            break
+
+        # 3. Parallel icra et (max 3)
+        batch = ready[:self.max_parallel]
+        tasks = [self.execute_tool(tool) for tool in batch]
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+        # 4. Yeni capabilities → yeni tool-lar unlock olur → loop davam edir
+```
+
+#### Tool Execution ([tool_scheduler.py#L290-L360](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/openclaw_bridge/tool_scheduler.py#L290-L360)):
+
+```python
+async def execute_tool(self, tool_name: str) -> ToolResult:
+    cmd = spec["cmd"].format(target=self.target, http_port=http_port)
+    proc = await asyncio.create_subprocess_shell(cmd, ...)
+    stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=...)
+
+    # Post-conditions KG-yə yazılır
+    for cap in spec.get("post", []):
+        self.kg.set_capability(cap)
+```
+
+> **Nəticə:** ToolScheduler tamamilə **deterministik** və **LLM-siz** çalışır. Pre-condition → KG check → binary check → subprocess icra → post-condition write.
+
+---
+
+### Q5: Parallel Execution — Port Lock Mexanizmi
+
+**Cavab:** [PortLockManager](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/openclaw_bridge/parallel_exploit.py#35-59) hər port üçün ayrı `asyncio.Lock` saxlayır. Eyni porta yönəlmiş iki hypothesis eyni anda çalışa bilmir.
+
+#### Mexanizm ([parallel_exploit.py#L35-L58](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/openclaw_bridge/parallel_exploit.py#L35-L58)):
+
+```python
+class PortLockManager:
+    def __init__(self):
+        self._locks: Dict[int, asyncio.Lock] = {}
+
+    def get_lock(self, port: int) -> asyncio.Lock:
+        if port not in self._locks:
+            self._locks[port] = asyncio.Lock()   # ← Port başına bir lock
+        return self._locks[port]
+```
+
+#### İstifadə ([parallel_exploit.py#L256-L265](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/openclaw_bridge/parallel_exploit.py#L256-L265)):
+
+```python
+async def _run_single(self, hypothesis, ...):
+    async with self.semaphore:              # ← Max 4 concurrent
+        port_lock = self.port_locks.get_lock(hypothesis.port)
+        async with port_lock:               # ← Port 80-ə yönəlmiş 2 hypothesis sıra ilə
+            evidence = await test_fn(hypothesis)
+```
+
+#### Early Termination ([parallel_exploit.py#L289-L297](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/openclaw_bridge/parallel_exploit.py#L289-L297)):
+
+```python
+if evidence.success and evidence.access_gained:
+    result.successes.append(evidence)
+    if not self.success_event.is_set():
+        self.first_success_id = hypothesis.id
+        self.success_event.set()  # ← asyncio.Event() ilə digər task-lara signal
+```
+
+---
+
+### Q6: ReconPhaseAgent — LLM-siz Necə Çalışır?
+
+**Cavab:** [ReconPhaseAgent](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/openclaw_bridge/recon_phase_agent.py#63-386) **100% tool-driven**-dir, heç bir LLM call yoxdur.
+
+#### İki Strategiya ([recon_phase_agent.py#L86-L117](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/openclaw_bridge/recon_phase_agent.py#L86-L117)):
+
+```python
+async def execute(self) -> dict:
+    # Strategy 1: nmap (subprocess)
+    result = await self._nmap_scan()    # nmap -sV -sC -T4 --open -oX -
+    if result and result.get("open_ports"):
+        result["scan_type"] = "nmap"
+        return result
+
+    # Strategy 2: Python socket scan (nmap yoxdursa)
+    result = await self._python_scan()  # asyncio.open_connection() ilə
+    result["scan_type"] = "python_fallback"
+    return result
+```
+
+#### Python Fallback Scanner ([recon_phase_agent.py#L260-L282](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/openclaw_bridge/recon_phase_agent.py#L260-L282)):
+
+```python
+async def _async_port_scan(self) -> List[int]:
+    async def check_port(port: int):
+        conn = asyncio.open_connection(self.target, port)
+        reader, writer = await asyncio.wait_for(conn, timeout=1.5)
+        return port  # Açıqdırsa port nömrəsini qaytar
+
+    tasks = [check_port(p) for p in COMMON_PORTS]  # 27 port
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+```
+
+#### KG-yə Yazma ([recon_phase_agent.py#L351-L386](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/openclaw_bridge/recon_phase_agent.py#L351-L386)):
+
+```python
+def _write_to_kg(self, result: dict):
+    self.kg.add_host(self.target)
+    for svc in result.get("services", []):
+        self.kg.add_port(self.target, svc["port"], "open")
+        self.kg.add_service(self.target, svc["port"], svc["name"], svc["version"])
+
+    # Capability flags for ToolScheduler
+    if name in ("http", "https"):
+        self.kg.set_capability("http_confirmed", True)
+    if name == "ssh":
+        self.kg.set_capability("ssh_confirmed", True)
+```
+
+---
+
+## 📋 SECTION 3: DATA FLOW
+
+### Q7: KG Data Model — Node və Edge Strukturu
+
+**Cavab:** KG NetworkX `DiGraph` istifadə edir. 8 node tipi, 8 edge tipi var.
+
+#### Node Types ([knowledge_graph.py#L29-L38](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/memory/knowledge_graph.py#L29-L38)):
+
+| Node Type | ID Format | Attributes |
+|-----------|-----------|------------|
+| HOST | `"10.10.10.5"` | os, hostname |
+| PORT | `"10.10.10.5:80"` | port, state |
+| SERVICE | `"10.10.10.5:80:nginx"` | name, version |
+| VULNERABILITY | `"vuln:CVE-2021-41773"` | cve, severity, cvss |
+| EXPLOIT | `"exploit:CVE-2021-41773:path_traversal"` | name, url, tested |
+| CREDENTIAL | `"cred:10.10.10.5:admin"` | username, password, source |
+| FILE | `"file:10.10.10.5:/etc/shadow"` | path, content_preview |
+| VERSION | — | — |
+
+#### Edge Types ([knowledge_graph.py#L41-L51](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/memory/knowledge_graph.py#L41-L51)):
+
+```
+HOST ──HAS_PORT──→ PORT ──RUNS_SERVICE──→ SERVICE ──HAS_VULN──→ VULNERABILITY ──EXPLOITABLE_VIA──→ EXPLOIT
+HOST ──USES_CREDENTIAL──→ CREDENTIAL
+HOST ──CONTAINS_FILE──→ FILE
+HOST ──CONNECTS_TO──→ HOST (lateral movement)
+```
+
+#### Capability System ([knowledge_graph.py#L81-L92](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/memory/knowledge_graph.py#L81-L92)):
+
+```python
+# KG-nin ayrı _capabilities dict-i var (graph-dan ayrı)
+self._capabilities: Dict[str, Any] = {}
+
+def set_capability(self, name: str, value: Any = True):
+    self._capabilities[name] = value  # "http_confirmed": True
+
+def has_capability(self, name: str) -> bool:
+    return bool(self._capabilities.get(name))
+```
+
+> **Nəticə:** KG iki təbəqədən ibarətdir: **NetworkX graph** (strukturlu məlumat) + **_capabilities dict** (ToolScheduler üçün flag-lar).
+
+---
+
+### Q8: Phase-lər Arası Məlumat Ötürmə
+
+**Cavab:** Phase-lər bir-birinə **birbaşa dict qaytarmır**. KG vasitəsilə ünsiyyət qururlar.
+
+#### Axın ([phase_agent.py#L100-L145](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/openclaw_bridge/phase_agent.py#L100-L145)):
+
+```python
+class PhaseAgentBase:
+    async def run(self) -> dict:
+        # 1. KG-dən əvvəlki phase-lərin nəticələrini oxu
+        context = self._load_context_from_kg()
+
+        # 2. Bu phase-in işini icra et
+        result = await self.execute()
+
+        # 3. Nəticəni KG-yə yaz
+        self._write_to_kg(result)
+
+        # 4. Xarici validasiya
+        is_valid = self._validate(result)
+
+        return result
+```
+
+#### Recon → Exploit arasındakı KG köprüsü:
+
+```
+ReconPhaseAgent._write_to_kg():
+    kg.add_host("10.10.10.5")
+    kg.add_service("10.10.10.5", 80, "nginx", "1.24.0")
+    kg.set_capability("http_confirmed", True)
+         ↓ (KG shared instance)
+ExploitPhaseAgent._load_context_from_kg():
+    vulns = self.kg.get_vulnerabilities_for_host(self.target)
+    services = self.kg.get_services_for_host(self.target)
+    # → HypothesisEngine.generate()-ə verilir
+```
+
+---
+
+### Q9: ShellBridge — Transport Seçimi
+
+**Cavab:** `ShellBridge.from_kg()` KG-dəki exploit node-larını oxuyur və attack_vector-a görə transport seçir.
+
+#### Attack Vector → Shell Type Mapping ([shell_bridge.py#L62-L83](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/openclaw_bridge/shell_bridge.py#L62-L83)):
+
+```python
+METHOD_TO_SHELL = {
+    "ftp_anonymous":     ShellType.FTP,       → FTPTransport (ftplib)
+    "default_creds":     ShellType.SSH,        → SSHTransport (asyncssh/paramiko)
+    "postgres_noauth":   ShellType.DB_POSTGRES,→ PostgresTransport (asyncpg/psycopg2)
+    "web_shell_upload":  ShellType.WEB,        → WebShellTransport (http.client)
+    "rce":               ShellType.WEB,        → WebShellTransport
+}
+```
+
+#### Factory Method ([shell_bridge.py#L519-L561](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/openclaw_bridge/shell_bridge.py#L519-L561)):
+
+```python
+@classmethod
+def from_kg(cls, kg, target) -> Optional["ShellBridge"]:
+    exploit_info = cls._get_exploit_info_from_kg(kg, target)
+    best = cls._select_best_exploit(exploit_info)  # success > tested > first
+
+    method = best.get("attack_vector")
+    shell_type = METHOD_TO_SHELL.get(method, ShellType.BASH_LOCAL)
+
+    # KG-dən credential al
+    creds = cls._get_credentials_from_kg(kg, target)
+
+    transport_class = cls.TRANSPORT_MAP[shell_type]
+    return cls(transport=transport_class(ctx), context=ctx)
+```
+
+#### PostgreSQL Shell-to-SQL Translation ([shell_bridge.py#L365-L377](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/openclaw_bridge/shell_bridge.py#L365-L377)):
+
+```python
+def _shell_to_sql(self, command: str) -> str:
+    if cmd.startswith("cat "):
+        return f"SELECT pg_read_file('{filepath}', 0, 10000)"
+    elif cmd in ("whoami", "id"):
+        return "SELECT current_user, session_user"
+    elif cmd == "uname -a":
+        return "SELECT version()"
+    return cmd  # SQL olaraq göndər
+```
+
+---
+
+## 📋 SECTION 3B: MEMORY & LEARNING
+
+### Q10: Persistent Memory — Cross-Session Learning
+
+**Cavab:** [PersistentMemory](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/memory/persistent_memory.py#146-490) SQLite-əsaslı 2 təbəqəli memory sistemidir.
+
+#### Layer 1: Episodic (Exact Match) ([persistent_memory.py#L328-L336](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/memory/persistent_memory.py#L328-L336)):
+
+```python
+# Eyni target IP üçün keçmiş cəhdləri tap
+exact_rows = self.conn.execute(
+    "SELECT ... FROM attempts WHERE target = ? "
+    "GROUP BY cve, attack_vector ORDER BY timestamp DESC",
+    (target,),
+).fetchall()
+```
+
+#### Layer 2: Semantic (Fingerprint Match) ([persistent_memory.py#L356-L370](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/memory/persistent_memory.py#L356-L370)):
+
+```python
+# Fərqli target-lərdə eyni service+version combo
+fingerprint = compute_fingerprint(services)  # sha256 hash
+similar_rows = self.conn.execute(
+    "SELECT ... FROM attempts WHERE fingerprint = ? AND target != ?",
+    (fingerprint, target),
+).fetchall()
+```
+
+#### Confidence Adjustment ([persistent_memory.py#L97-L122](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/memory/persistent_memory.py#L97-L122)):
+
+```python
+def get_confidence_adjustment(self, cve, service, version):
+    # Exact match: -0.15 * attempt_count (uğursuzluq), +0.20 (uğur)
+    # Similar match: -0.08 (uğursuzluq), +0.15 (uğur)
+    return max(-0.8, min(0.5, adjustment))  # Clamp
+```
+
+#### HypothesisEngine-də istifadəsi ([hypothesis_engine.py#L266-L275](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/openclaw_bridge/hypothesis_engine.py#L266-L275)):
+
+```python
+# Memory recall
+recall = self.memory.recall(self.target)
+for h in hypotheses:
+    adj = recall.get_confidence_adjustment(h.cve, h.target_service, h.version)
+    h.confidence = max(0.05, min(0.99, h.confidence + adj))
+```
+
+> **Nəticə:** Əgər CVE-2021-41773 3 dəfə uğursuz olubsa: `confidence -= 0.15 * 3 = -0.45`. Növbəti sessiyada bu hypothesis sonuncu sıraya düşür.
+
+---
+
+## 📋 SECTION 4: ADAPTIVE MUTATION
+
+### Q11: ExploitLoop — WAF Aşkarlananda Nə Baş Verir?
+
+**Cavab:** [adaptive_mutation.py](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/openclaw_bridge/adaptive_mutation.py) daxilindəki [ExploitLoop](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/openclaw_bridge/adaptive_mutation.py#545-768) WAF-ı aşkarlayır və deterministik mutation strategiyaları tətbiq edir.
+
+#### Response Classifier ([adaptive_mutation.py#L79-L94](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/openclaw_bridge/adaptive_mutation.py#L79-L94)):
+
+```python
+_WAF_PATTERNS = [
+    (r"cloudflare",                       0.95, "Cloudflare WAF"),
+    (r"mod_security|modsecurity",         0.90, "ModSecurity WAF"),
+    (r"aws[- ]?waf",                      0.90, "AWS WAF"),
+    (r"imperva|incapsula",                0.90, "Imperva WAF"),
+    (r"blocked|forbidden|access denied",  0.70, "Generic block"),
+]
+```
+
+#### WAF → Mutation Sırası ([adaptive_mutation.py#L279-L306](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/openclaw_bridge/adaptive_mutation.py#L279-L306)):
+
+```python
+MUTATION_STRATEGIES = {
+    ResponseClass.WAF_DETECTED: [
+        MutationStrategy.CASE_VARIATION,         # SeLeCt
+        MutationStrategy.COMMENT_INJECTION,      # SE/**/LECT
+        MutationStrategy.DOUBLE_URL_ENCODE,      # %2527
+        MutationStrategy.UNICODE_NORMALIZATION,   # ＇ (fullwidth)
+        MutationStrategy.HPP,                    # param=safe&param=malicious
+        MutationStrategy.CHUNKED_TRANSFER,
+        MutationStrategy.NULL_BYTE,              # %00
+        MutationStrategy.NEWLINE_INJECTION,      # CRLF
+    ],
+    ResponseClass.RATE_LIMITED: [
+        MutationStrategy.DELAY_RETRY,            # Gözlə və təkrarla
+    ],
+}
+```
+
+#### Loop Axını ([adaptive_mutation.py#L614-L710](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/openclaw_bridge/adaptive_mutation.py#L614-L710)):
+
+```
+Iteration 0: payload göndər → 403 + "cloudflare" → WAF_DETECTED
+Iteration 1: CASE_VARIATION tətbiq et (SeLeCt) → göndər → 403 → hələ WAF
+Iteration 2: COMMENT_INJECTION (SE/**/LECT) → göndər → 200 + SQL error → VULNERABLE ✅
+```
+
+> [!IMPORTANT]
+> **BOŞLUQ:** [ExploitLoop](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/openclaw_bridge/adaptive_mutation.py#545-768) **hazırda** `ExploitPhaseAgent._test_single_hypothesis()` tərəfindən **istifadə olunmur**. [_sandbox_llm_test()](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/openclaw_bridge/exploit_phase_agent.py#529-575) birbaşa LLM-ə müraciət edir. Mutation sistemi mövcuddur amma exploit pipeline-a inteqrasiya edilməyib.
+
+---
+
+### Q12: Rate Limiting — HTTP 429 Handling
+
+**Cavab:** [ResponseClassifier](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/openclaw_bridge/adaptive_mutation.py#121-250) HTTP 429-u aşkarlayır, `MUTATION_STRATEGIES` dict-ində `DELAY_RETRY` strategiyası var. **Lakin** bu **inteqrasiya olunmayıb**.
+
+#### Aşkarlama mövcuddur ([adaptive_mutation.py#L164-L167](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/openclaw_bridge/adaptive_mutation.py#L164-L167)):
+
+```python
+elif status_code == 429:
+    signals.append("HTTP 429 Too Many Requests")
+    best_class = ResponseClass.RATE_LIMITED
+    best_confidence = 0.95
+```
+
+#### Mutation strategiyası mövcuddur:
+
+```python
+ResponseClass.RATE_LIMITED: [
+    MutationStrategy.DELAY_RETRY,  # confidence=0.75
+]
+```
+
+> [!WARNING]
+> **BOŞLUQ:** [ExploitPhaseAgent](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/openclaw_bridge/exploit_phase_agent.py#71-759)-da [ExploitLoop](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/openclaw_bridge/adaptive_mutation.py#545-768) istifadə olunmadığı üçün, 429 cavabı alındıqda heç bir backoff və ya delay mexanizmi çalışmır. [_test_single_hypothesis()](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/openclaw_bridge/exploit_phase_agent.py#171-184) sadəcə uğursuz olaraq qeyd edir.
+
+---
+
+## 📋 SECTION 5: VALIDATION & REPORTING
+
+### Q13: External Validation — [_validate()](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/openclaw_bridge/phase_agent.py#295-310) Mexanizmi
+
+**Cavab:** Hər phase-in output-u [_validate()](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/openclaw_bridge/phase_agent.py#295-310) metodu ilə yoxlanılır.
+
+#### Validation Flow ([phase_agent.py#L130-L180](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/openclaw_bridge/phase_agent.py#L130-L180)):
+
+```python
+def _validate(self, result: dict) -> bool:
+    # 1. Required fields yoxla
+    for field in self.REQUIRED_OUTPUT_FIELDS:
+        if field not in result:
+            self._log(f"VALIDATION FAILED: missing {field}")
+            return False
+
+    # 2. Type checking
+    if not isinstance(result, dict):
+        return False
+
+    # 3. Phase-specific validation
+    return self._phase_specific_validation(result)
+```
+
+#### Recon Phase üçün:
+
+```python
+REQUIRED_OUTPUT_FIELDS = ["target", "open_ports", "services"]
+```
+
+#### Exploit Phase üçün:
+
+```python
+REQUIRED_OUTPUT_FIELDS = ["target", "hypotheses_tested", "results"]
+```
+
+> **Nəticə:** Validation **əsas** olaraq structural-dır (field-lərin mövcudluğu). **Semantic validation** (məsələn, LLM-in exploit kodunun düzgün işlədiyini yoxlamaq) müyəssər olsa da, content validation məhduddur.
+
+---
+
+### Q14: CausalChain Report — KG-dən Report-a
+
+**Cavab:** [CausalChainReport](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/reporting/causal_chain.py#25-246) hər tapıntını 5 hissəyə bölür.
+
+#### Report Structure ([causal_chain.py#L56-L80](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/reporting/causal_chain.py#L56-L80)):
+
+```python
+def generate(self, finding, validation) -> str:
+    return f"""
+    WHY (Root Cause):    {finding.get('root_cause')}
+    WHAT (Vulnerability): CVE: {finding.get('cve')}, CVSS: {finding.get('cvss')}
+    HOW (Exploitation):  {self._format_exploitation_path(finding.get('steps'))}
+    PROOF (Evidence):    {self._format_proof(validation.get('proof'))}
+    FIX (Recommendation): Immediate + Long-term
+    """
+```
+
+#### Priority Matrix ([causal_chain.py#L214-L227](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/reporting/causal_chain.py#L214-L227)):
+
+```python
+[!!!] Critical (24h):  CVSS >= 9.0
+[!!]  High (7 days):   7.0 <= CVSS < 9.0
+[!]   Medium (30 days): 4.0 <= CVSS < 7.0
+[-]   Low (90 days):    CVSS < 4.0
+```
+
+---
+
+## 📋 SECTION 6: GAP ANALYSIS
+
+### Q15: Sandbox İzolyasiya — LLM Kodunun Təhlükəsizliyi
+
+**Cavab:** Sandbox **minimum** təhlükəsizlik təmin edir.
+
+#### Mövcud Qoruma ([exploit_phase_agent.py#L580-L600](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/openclaw_bridge/exploit_phase_agent.py#L580-L600)):
+
+```python
+# 1. Banned keyword check (sadəcə string match)
+BANNED = ["os.system", "subprocess", "exec(", "eval("]
+if any(banned in code for banned in BANNED):
+    return None
+
+# 2. Temporary file icra
+with tempfile.NamedTemporaryFile(suffix=".py") as f:
+    f.write(code)
+
+# 3. Subprocess timeout
+proc = await asyncio.create_subprocess_exec("python", f.name, timeout=15)
+```
+
+> [!CAUTION]
+> **Böyük Boşluqlar:**
+> - `__import__("os").system()` - string match ilə tutulmur
+> - `open("/etc/shadow").read()` - fayl icazələri məhdudlaşdırılmır
+> - Network access məhdudlaşdırılmır (LLM kodu hər yerə request edə bilər)
+> - Heç bir `seccomp`, `chroot`, `nsjail` və ya container izolyasiyası yoxdur
+
+---
+
+### Q16: Phase Transition — Hansı Phase Başa Çatıb?
+
+**Cavab:** Phase transition **xarici orchestrator** ([pentest.py](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/pentest.py)) tərəfindən idarə olunur. Hər phase sıra ilə çağırılır, completion check yoxdur.
+
+```python
+# pentest.py (simplified flow):
+async def run_pentest(self):
+    recon = await ReconPhaseAgent(self.kg, self.target).run()
+    # → Heç bir "is_recon_complete()" yoxla yoxdur
+    exploit = await ExploitPhaseAgent(self.kg, self.target).run()
+    # → exploit result-dan asılı olmayaraq post_exploit çağırılır
+    post = await PostExploitPhaseAgent(self.kg, self.target).run()
+```
+
+> [!WARNING]
+> **BOŞLUQ:** `PhaseValidator` class-ı **mövcud deyil**. Recon 0 port tapsa belə exploit phase çağırılır. Phase-lər arası quality gate yoxdur.
+
+---
+
+### Q17: KG Query — Natural Language Parsing
+
+**Cavab:** [query_natural_language()](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/memory/knowledge_graph.py#174-215) regex+keyword matching istifadə edir, LLM deyil.
+
+#### Parsing Logic ([knowledge_graph.py#L174-L214](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/memory/knowledge_graph.py#L174-L214)):
+
+```python
+def query_natural_language(self, query: str) -> Dict:
+    ip_match = re.search(r'\b(?:\d{1,3}\.){3}\d{1,3}\b', query)
+    cve_match = re.search(r'CVE-\d{4}-\d{4,7}', query)
+
+    if "vulnerabilities" in query_lower:
+        return self.get_vulnerabilities_for_host(ip_match.group(0))
+    elif "exploits" in query_lower:
+        return self.get_exploits_for_cve(cve_match.group(0))
+    elif "services" in query_lower:
+        return self.get_services_for_host(ip_match.group(0))
+    elif "attack" in query_lower and "path" in query_lower:
+        return self.get_attack_path()
+```
+
+> **Nəticə:** Bu sadə keyword matching-dir. "Show me the weak spots" kimi fuzzy query-lər support olunmur.
+
+---
+
+### Q18: Fingerprint Computation — Cross-Target Learning
+
+**Cavab:** [compute_fingerprint()](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/memory/persistent_memory.py#128-141) service+version+port kombinasiyasını SHA256 hash-ə çevirir.
+
+#### Implementation ([persistent_memory.py#L128-L140](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/memory/persistent_memory.py#L128-L140)):
+
+```python
+def compute_fingerprint(services: List[Dict]) -> str:
+    normalized = sorted(
+        [f"{s.get('name', '')}:{s.get('version', '')}:{s.get('port', 0)}"
+         for s in services]
+    )
+    raw = "|".join(normalized)
+    return hashlib.sha256(raw.encode()).hexdigest()[:16]  # 16 char hash
+```
+
+**Nümunə:**
+```
+services = [{"name": "nginx", "version": "1.24.0", "port": 80},
+            {"name": "ssh", "version": "8.2p1", "port": 22}]
+# → sorted: ["nginx:1.24.0:80", "ssh:8.2p1:22"]
+# → raw: "nginx:1.24.0:80|ssh:8.2p1:22"
+# → fingerprint: "a3f9c2d1e5b74801"
+```
+
+> Fərqli IP-lər eyni fingerprint-ə sahib ola bilər → cross-target learning.
+
+---
+
+### Q19: Post-Exploit Chain → KG Integration
+
+**Cavab:** [PostExploitChain](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/openclaw_bridge/post_exploit_chain.py#325-864) hər stage-in nəticələrini KG-yə yazır.
+
+#### KG Write ([post_exploit_chain.py](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/openclaw_bridge/post_exploit_chain.py)):
+
+```python
+# Stage 1: Local Enumeration
+kg.set_capability("post_exploit:os_info", output)
+kg.set_capability("post_exploit:current_user", output)
+
+# Stage 3: Credential Harvesting
+kg.add_credential(target, username, password, source="post_exploit_chain")
+
+# Stage 5: Persistence
+kg.set_capability("post_exploit:persistence_installed", True)
+
+# Stage 6: Data Exfiltration
+kg.add_file(target, filepath, content_preview)
+```
+
+---
+
+### Q20: Adaptive Mutation → Exploit Pipeline İnteqrasiyası
+
+**Cavab:** [AdaptivePayloadMutator](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/openclaw_bridge/adaptive_mutation.py#318-504) tam implement olunub, amma **exploit pipeline ilə inteqrasiya olunmayıb**.
+
+#### Mövcud Sistem (İnteqrasiya olunmamış):
+
+```
+ExploitPhaseAgent._test_single_hypothesis()
+    └→ direct socket test (FTP/SSH/HTTP)
+    └→ _sandbox_llm_test()  ← LLM kod yazır, bir dəfə icra edir
+                              ↑ ExploitLoop ÇAĞIRILMIR
+```
+
+#### Nəzərdə tutulan Sistem (İnteqrasiya edilsə):
+
+```
+ExploitPhaseAgent._test_single_hypothesis()
+    └→ direct socket test
+    └→ ExploitLoop.run(               ← BU İSTİFADƏ OLUNMUR
+           hypothesis_id,
+           initial_payload,
+           tool_fn=self._execute_payload,
+           max_iterations=10
+       )
+       └→ Classify response
+       └→ WAF? → Mutation → Retry
+       └→ Vulnerable? → SUCCESS
+```
+
+> [!CAUTION]
+> **Böyük Boşluq:** [adaptive_mutation.py](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/openclaw_bridge/adaptive_mutation.py) **768 sətir** tam işləyən koddur — [ResponseClassifier](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/openclaw_bridge/adaptive_mutation.py#121-250), [AdaptivePayloadMutator](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/openclaw_bridge/adaptive_mutation.py#318-504), [ExploitLoop](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/openclaw_bridge/adaptive_mutation.py#545-768) hamısı implement olunub. Lakin [exploit_phase_agent.py](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/openclaw_bridge/exploit_phase_agent.py)-da **[ExploitLoop](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/openclaw_bridge/adaptive_mutation.py#545-768) heç yerdə import və ya istifadə olunmur**. Bu o deməkdir ki, WAF aşkarlandıqda heç bir bypass cəhdi olmur — hypothesis sadəcə "failed" olaraq qeyd olunur.
+
+---
+
+## 📊 YEKUN: BOŞLUQLARIN XÜLASƏSİ
+
+| # | Boşluq | Təsir | Fayl |
+|---|--------|-------|------|
+| 1 | ExploitLoop inteqrasiyası yoxdur | WAF bypass olunmur | [exploit_phase_agent.py](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/openclaw_bridge/exploit_phase_agent.py) |
+| 2 | Sandbox izolyasiyası zəifdir | LLM kodu əsas sistemə daxil ola bilər | [exploit_phase_agent.py](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/openclaw_bridge/exploit_phase_agent.py) |
+| 3 | Phase quality gate yoxdur | Boş recon → boş exploit | [pentest.py](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/pentest.py) |
+| 4 | 429 Rate Limit handler yoxdur | Target-i aşkarlaya bilər | [exploit_phase_agent.py](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/openclaw_bridge/exploit_phase_agent.py) |
+| 5 | KG NL query çox sadədir | Fuzzy sorğular işləmir | [knowledge_graph.py](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/memory/knowledge_graph.py) |
