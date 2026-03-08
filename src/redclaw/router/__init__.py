@@ -1,10 +1,8 @@
 """
-RedClaw V3.1 Router — LLM Reliability Layer + Model Alloy + OpenRouter
+RedClaw V3.1 Router — LLM Reliability Layer
 
 Components:
-  - LLMClient: Enterprise LLM client with retry, fallback, compaction, cost tracking
-  - OpenRouterClient: API client for OpenRouter (gpt-oss-120B + qwen3-coder:free)
-  - ModelAlloyRouter: Strategic model selection with 60/40 balance enforcement
+  - LLMClient: Enterprise LLM client with retry, failover, compaction, cost tracking
 """
 
 from .llm_client import (
@@ -17,8 +15,6 @@ from .llm_client import (
     fix_message_list,
     auto_compact_messages,
 )
-from .openrouter_client import OpenRouterClient
-from .model_alloy import ModelAlloyRouter, ModelSelector, BalancedRouter
 
 __all__ = [
     "LLMClient",
@@ -29,8 +25,4 @@ __all__ = [
     "AllProvidersFailedError",
     "fix_message_list",
     "auto_compact_messages",
-    "OpenRouterClient",
-    "ModelAlloyRouter",
-    "ModelSelector",
-    "BalancedRouter",
 ]

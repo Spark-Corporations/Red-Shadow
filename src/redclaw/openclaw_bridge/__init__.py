@@ -1,18 +1,20 @@
-"""OpenClaw integration bridge — runtime, skills, tool protocol, Phi-4 provider."""
+"""OpenClaw integration bridge — runtime + tool bridge."""
 
 from .runtime import OpenClawRuntime, RuntimeConfig, AgentMessage
-from .phi4_provider import Phi4Provider, LLMResponse
 from .tool_bridge import ToolBridge, ToolCallRequest, ToolCallResult
-from .skill_loader import SkillLoader
+
+# Re-export memory modules so imports from openclaw_bridge still work
+from ..memory.knowledge_graph import PentestKnowledgeGraph  # noqa: F401
+from ..memory.persistent_memory import PersistentMemory      # noqa: F401
 
 __all__ = [
     "OpenClawRuntime",
     "RuntimeConfig",
     "AgentMessage",
-    "Phi4Provider",
-    "LLMResponse",
     "ToolBridge",
     "ToolCallRequest",
     "ToolCallResult",
-    "SkillLoader",
+    "PentestKnowledgeGraph",
+    "PersistentMemory",
 ]
+

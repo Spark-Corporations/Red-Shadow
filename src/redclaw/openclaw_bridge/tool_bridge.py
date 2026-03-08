@@ -1,12 +1,12 @@
 """
-ToolBridge — Translates between OpenClaw tool calls and RedClaw MCP server execution.
+ToolBridge — Translates between OpenClaw tool calls and RedClaw tool wrappers.
 
 This bridge:
   - Receives tool-call requests from the OpenClaw agent
-  - Maps them to the appropriate RedClaw MCP server
-  - Executes the tool via the MCP server layer
+  - Maps them to the appropriate tool wrapper (nmap, nuclei, sqlmap, gobuster, ffuf, bash)
+  - Executes the tool via the wrapper (subprocess + OutputCleaner)
   - Formats results back for the OpenClaw agent context
-  - Handles errors, timeouts, and retries
+  - Validates commands via GuardianRails
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ logger = logging.getLogger("redclaw.openclaw_bridge.tool_bridge")
 class ToolCallRequest:
     """Incoming tool call from the OpenClaw agent."""
     id: str
-    name: str  # e.g., "redclaw_nmap"
+    name: str  # e.g., "nmap_scan", "exec_command"
     parameters: dict[str, Any] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
 
@@ -42,26 +42,27 @@ class ToolCallResult:
 
 class ToolBridge:
     """
-    Bridge between OpenClaw agent tool calls and RedClaw MCP servers.
+    Bridge between OpenClaw agent tool calls and RedClaw tool wrappers.
 
     Flow:
-      OpenClaw Agent → ToolCallRequest → ToolBridge → MCP Server → ToolCallResult → Agent
+      OpenClaw Agent → ToolCallRequest → ToolBridge → Wrapper → subprocess → OutputCleaner → ToolCallResult → Agent
 
     Usage:
-        bridge = ToolBridge()
-        bridge.register_server("nmap", nmap_server)
-        result = await bridge.execute(ToolCallRequest(id="1", name="redclaw_nmap", ...))
+        bridge = ToolBridge(guardian=guardian)
+        bridge.register_server("nmap", nmap_wrapper)
+        bridge.register_server("bash", bash_wrapper)
+        result = await bridge.execute(ToolCallRequest(id="1", name="nmap_scan", ...))
     """
 
     def __init__(self, guardian=None):
-        self._servers: dict[str, Any] = {}  # name → MCP server instance
+        self._servers: dict[str, Any] = {}       # name → tool wrapper instance
         self._tool_to_server: dict[str, str] = {}  # tool schema name → server name
-        self._guardian = guardian  # GuardianRails for command validation
+        self._guardian = guardian                    # GuardianRails for command validation
         self._execution_log: list[ToolCallResult] = []
         logger.info("ToolBridge initialized")
 
     def register_server(self, name: str, server: Any) -> None:
-        """Register an MCP server for tool execution."""
+        """Register a tool wrapper for execution."""
         self._servers[name] = server
 
         # Build tool-schema-name → server-name mapping
@@ -69,48 +70,43 @@ class ToolBridge:
             for schema in server.get_tools():
                 tool_name = schema.name if hasattr(schema, "name") else str(schema)
                 self._tool_to_server[tool_name] = name
-                logger.debug(f"  Tool '{tool_name}' → server '{name}'")
+                logger.debug(f"  Tool '{tool_name}' → wrapper '{name}'")
 
-        logger.info(f"Registered MCP server: {name}")
+        logger.info(f"Registered tool wrapper: {name}")
 
     def register_servers(self, servers: dict[str, Any]) -> None:
-        """Register multiple MCP servers at once."""
+        """Register multiple tool wrappers at once."""
         for name, server in servers.items():
             self.register_server(name, server)
 
     @property
     def available_tools(self) -> list[str]:
         """List of registered tool names."""
-        return list(self._servers.keys())
+        return list(self._tool_to_server.keys())
 
     async def execute(self, request: ToolCallRequest) -> ToolCallResult:
         """
-        Execute a tool call by routing to the appropriate MCP server.
+        Execute a tool call by routing to the appropriate wrapper.
 
         Steps:
-          1. Extract the tool name (strip "redclaw_" prefix)
-          2. Validate with GuardianRails if available
-          3. Route to the registered MCP server
-          4. Execute and capture result
-          5. Format and return
+          1. Resolve tool name → wrapper
+          2. Validate with GuardianRails if command present
+          3. Execute via wrapper.execute(name, params)
+          4. Convert CleanedOutput → ToolCallResult
+          5. Log and return
         """
         start = time.monotonic()
 
-        # Resolve tool name → server name
-        #  1. Try direct tool-schema-name mapping (e.g. "nmap_scan" → "nmap")
-        #  2. Strip "redclaw_" prefix and try again
-        #  3. Fall back to raw name as server lookup
+        # Resolve tool name → wrapper name
         raw_name = request.name
         tool_name = raw_name.replace("redclaw_", "")
 
-        # Resolve via tool-to-server map
         server_name = (
             self._tool_to_server.get(raw_name)
             or self._tool_to_server.get(tool_name)
-            or tool_name  # fallback: assume tool_name == server_name
+            or tool_name
         )
 
-        # Find the server
         server = self._servers.get(server_name)
         if not server:
             result = ToolCallResult(
@@ -118,10 +114,8 @@ class ToolBridge:
                 name=request.name,
                 success=False,
                 output="",
-                error=f"No MCP server registered for tool: {raw_name} "
-                      f"(resolved: {server_name}). "
-                      f"Available servers: {self.available_tools}. "
-                      f"Known tools: {list(self._tool_to_server.keys())}",
+                error=f"No wrapper registered for tool: {raw_name}. "
+                      f"Available: {list(self._tool_to_server.keys())}",
             )
             self._execution_log.append(result)
             return result
@@ -143,37 +137,39 @@ class ToolBridge:
                 logger.warning(f"Tool call blocked: {request.name} — {validation.reasons}")
                 return result
 
-        # Execute via MCP server
+        # Execute via wrapper
         try:
-            target = request.parameters.get("target", "")
-            # Pass ALL parameters as options — LLM may set timeout, session, etc.
-            # at top-level rather than inside an "options" sub-dict
-            options = dict(request.parameters)  # copy all params
-            options.pop("target", None)  # already extracted
-            options.pop("command", None)  # already extracted above
+            # All wrappers implement: execute(name, params) -> CleanedOutput
+            if hasattr(server, "execute"):
+                import asyncio
+                cleaned = server.execute(raw_name, request.parameters)
+                # If the wrapper returns a coroutine, await it
+                if asyncio.iscoroutine(cleaned):
+                    cleaned = await cleaned
 
-            # MCP servers implement an `execute` method
-            if hasattr(server, "execute_tool"):
-                output = await server.execute_tool(
-                    command=command,
-                    target=target,
-                    options=options,
-                    tool_name=raw_name,
+                # Convert CleanedOutput → ToolCallResult
+                duration = time.monotonic() - start
+                result = ToolCallResult(
+                    id=request.id,
+                    name=request.name,
+                    success=cleaned.success,
+                    output=cleaned.to_llm_context(),
+                    error="; ".join(cleaned.warnings) if not cleaned.success else None,
+                    duration=duration,
+                    metadata={
+                        "tool": tool_name,
+                        "raw_length": cleaned.raw_length,
+                        "cleaned_length": cleaned.cleaned_length,
+                    },
                 )
-            elif hasattr(server, "execute"):
-                output = server.execute(command=command, target=target, **options)
             else:
-                output = str(server)
-
-            duration = time.monotonic() - start
-            result = ToolCallResult(
-                id=request.id,
-                name=request.name,
-                success=True,
-                output=str(output) if not isinstance(output, str) else output,
-                duration=duration,
-                metadata={"tool": tool_name, "target": target},
-            )
+                result = ToolCallResult(
+                    id=request.id,
+                    name=request.name,
+                    success=False,
+                    output="",
+                    error=f"Wrapper {server_name} has no execute method",
+                )
 
         except Exception as e:
             duration = time.monotonic() - start
@@ -190,12 +186,12 @@ class ToolBridge:
         self._execution_log.append(result)
         logger.info(
             f"Tool executed: {request.name} → "
-            f"{'OK' if result.success else 'FAIL'} ({duration:.2f}s)"
+            f"{'OK' if result.success else 'FAIL'} ({result.duration:.2f}s)"
         )
         return result
 
     def format_for_agent(self, result: ToolCallResult) -> dict[str, Any]:
-        """Format a tool result for inclusion in the OpenClaw agent context."""
+        """Format a tool result for inclusion in agent context."""
         return {
             "tool_call_id": result.id,
             "name": result.name,
@@ -212,7 +208,8 @@ class ToolBridge:
         total = len(self._execution_log)
         successes = sum(1 for r in self._execution_log if r.success)
         return {
-            "registered_servers": len(self._servers),
+            "registered_wrappers": len(self._servers),
+            "registered_tools": len(self._tool_to_server),
             "total_executions": total,
             "successes": successes,
             "failures": total - successes,

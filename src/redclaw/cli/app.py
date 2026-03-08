@@ -968,54 +968,37 @@ class RedClawCLI:
 
 
 def _build_runtime():
-    """Build the full runtime stack with ToolBridge wired to all MCP servers."""
+    """Build the full runtime stack with tool wrappers + OutputCleaner."""
     from ..openclaw_bridge.runtime import OpenClawRuntime, RuntimeConfig
     from ..openclaw_bridge.tool_bridge import ToolBridge
     from ..core.guardian import GuardianRails
-    from ..mcp_servers.nmap_server import NmapServer
-    from ..mcp_servers.masscan_server import MasscanServer
-    from ..mcp_servers.nuclei_server import NucleiServer
-    from ..mcp_servers.metasploit_server import MetasploitServer
-    from ..mcp_servers.sqlmap_server import SQLMapServer
-    from ..mcp_servers.hydra_server import HydraServer
-    from ..mcp_servers.bloodhound_server import BloodHoundServer
-    from ..mcp_servers.peas_servers import LinPEASServer, WinPEASServer
-    from ..mcp_servers.custom_exploit_server import CustomExploitServer
-    from ..mcp_servers.terminal_server import TerminalServer
-    from ..mcp_servers.agent_control_server import AgentControlServer
-    from ..mcp_servers.file_server import FileServer
+    from ..tools.output_cleaner import OutputCleaner
+    from ..tools.nmap_wrapper import NmapWrapper
+    from ..tools.nuclei_wrapper import NucleiWrapper
+    from ..tools.sqlmap_wrapper import SqlmapWrapper
+    from ..tools.gobuster_wrapper import GobusterWrapper
+    from ..tools.ffuf_wrapper import FfufWrapper
+    from ..tools.bash_wrapper import BashWrapper
 
+    # ── Model config — OpenRouter only ────────────────────────────────
     model_file = Path.home() / ".redclaw" / "active_model.txt"
-    active_model = "gemini"
+    active_model = "openrouter"
     if model_file.exists():
         active_model = model_file.read_text().strip().lower()
 
-    provider_table = {
-        "gemini":     ("gemini-2.5-flash", "https://generativelanguage.googleapis.com/v1beta/openai"),
-        "openai":     ("gpt-4o-mini", "https://api.openai.com/v1"),
-        "groq":       ("llama-3.3-70b-versatile", "https://api.groq.com/openai/v1"),
-        "openrouter": ("qwen/qwen-2.5-coder-32b-instruct", "https://openrouter.ai/api/v1"),
-        "gpt-oss":    ("openai/gpt-oss-120b:free", "https://openrouter.ai/api/v1"),
-        "dolphin":    ("cognitivecomputations/dolphin-mistral-24b-venice-edition:free", "https://openrouter.ai/api/v1"),
-        "nemotron":   ("nvidia/nemotron-3-nano-30b-a3b:free", "https://openrouter.ai/api/v1"),
+    # All models go through OpenRouter API
+    model_table = {
+        "openrouter":  "openai/gpt-4.1-mini",
+        "gpt-4.1":     "openai/gpt-4.1-mini",
+        "gpt-4.1-nano":"openai/gpt-4.1-nano",
+        "claude":      "anthropic/claude-sonnet-4",
+        "gemini":      "google/gemini-2.5-flash",
+        "deepseek":    "deepseek/deepseek-chat-v3-0324:free",
+        "qwen":        "qwen/qwen-2.5-coder-32b-instruct:free",
     }
 
-    if active_model in provider_table:
-        model_name, default_url = provider_table[active_model]
-    elif active_model == "phi":
-        model_name = "phi-4"
-        link_file = Path.home() / ".redclaw" / "link.txt"
-        default_url = link_file.read_text().strip() if link_file.exists() else "https://placeholder.ngrok-free.app"
-    else:
-        model_name = "qwen-coder"
-        ip_file = Path.home() / ".redclaw" / "model_ip.txt"
-        link_file = Path.home() / ".redclaw" / "link.txt"
-        default_url = "http://35.223.143.247:8002"
-        if link_file.exists() and link_file.read_text().strip():
-            default_url = link_file.read_text().strip()
-        if ip_file.exists() and ip_file.read_text().strip():
-            saved_ip = ip_file.read_text().strip()
-            default_url = f"http://{saved_ip}" if not saved_ip.startswith("http") else saved_ip
+    model_name = model_table.get(active_model, "openai/gpt-4.1-mini")
+    default_url = "https://openrouter.ai/api/v1"
 
     os.environ.setdefault("REDCLAW_LLM_URL", default_url)
     os.environ.setdefault("REDCLAW_LLM_MODEL", model_name)
@@ -1028,13 +1011,17 @@ def _build_runtime():
     guardian = GuardianRails()
     runtime = OpenClawRuntime(config)
 
+    # ── Tool wrappers with shared OutputCleaner ───────────────────────
+    cleaner = OutputCleaner(max_chars=4000)
+
     bridge = ToolBridge(guardian=guardian)
     bridge.register_servers({
-        "nmap": NmapServer(), "masscan": MasscanServer(), "nuclei": NucleiServer(),
-        "metasploit": MetasploitServer(), "sqlmap": SQLMapServer(),
-        "hydra": HydraServer(), "custom_exploit": CustomExploitServer(),
-        "bloodhound": BloodHoundServer(), "linpeas": LinPEASServer(), "winpeas": WinPEASServer(),
-        "terminal": TerminalServer(), "agent_control": AgentControlServer(), "file_ops": FileServer(),
+        "nmap": NmapWrapper(cleaner=cleaner),
+        "nuclei": NucleiWrapper(cleaner=cleaner),
+        "sqlmap": SqlmapWrapper(cleaner=cleaner),
+        "gobuster": GobusterWrapper(cleaner=cleaner),
+        "ffuf": FfufWrapper(cleaner=cleaner),
+        "bash": BashWrapper(cleaner=cleaner),
     })
     runtime.register_tool_bridge(bridge)
 
@@ -1043,12 +1030,7 @@ def _build_runtime():
     except Exception:
         pass
 
-    # Build LLM Client with provider failover
-    from ..router.llm_client import LLMClient
-    llm_client = LLMClient()
-    llm_client.add_providers_from_env()
-
-    return runtime, guardian, config, llm_client
+    return runtime, guardian, config
 
 
 def main() -> None:
@@ -1087,7 +1069,7 @@ def main() -> None:
 
         if subcmd == "agent":
             task = " ".join(sys.argv[2:]) if len(sys.argv) > 2 else "Run a health check"
-            runtime, guardian, _, llm_client = _build_runtime()
+            runtime, guardian, _ = _build_runtime()
             async def _run():
                 await runtime.initialize()
                 async for msg in runtime.run_task(task):
@@ -1163,7 +1145,7 @@ def main() -> None:
     from ..core.config import ConfigManager
     from ..core.state import StateManager
 
-    runtime, guardian, _, llm_client = _build_runtime()
+    runtime, guardian, _ = _build_runtime()
 
     config = None
     config_candidates = ["engagement.yaml", "engagement.yml", "redclaw.yaml"]
@@ -1182,7 +1164,6 @@ def main() -> None:
         state_manager=state,
         runtime=runtime,
         guardian=guardian,
-        llm_client=llm_client,
     )
     cli.run()
 

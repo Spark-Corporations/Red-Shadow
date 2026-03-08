@@ -1,1 +1,1 @@
-"""Agent system — phase-specific pentesting agents with ReAct loop."""
+"""Agent system — base agent with ReAct loop."""

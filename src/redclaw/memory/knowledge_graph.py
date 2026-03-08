@@ -71,7 +71,25 @@ class PentestKnowledgeGraph:
         self.graph = nx.DiGraph()
         self._node_count_before = 0
         self._edge_count_before = 0
+        self._capabilities: Dict[str, Any] = {}  # Capability flags for TDG
         logger.info("Knowledge Graph initialized")
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # CAPABILITY TRACKING (for Tool Dependency Graph)
+    # ═══════════════════════════════════════════════════════════════════════
+
+    def set_capability(self, name: str, value: Any = True):
+        """Set a capability flag (e.g. 'open_ports', 'http_confirmed')."""
+        self._capabilities[name] = value
+        logger.debug(f"Capability set: {name} = {value}")
+
+    def has_capability(self, name: str) -> bool:
+        """Check if a capability flag is set and truthy."""
+        return bool(self._capabilities.get(name))
+
+    def get_capabilities(self) -> Dict[str, Any]:
+        """Get all capability flags."""
+        return dict(self._capabilities)
 
     # ═══════════════════════════════════════════════════════════════════════
     # GRAPH OPERATIONS
@@ -359,6 +377,24 @@ class PentestKnowledgeGraph:
             "total_edges": self.graph.number_of_edges(),
             "node_types": type_counts,
         }
+
+    def add_credential(self, host_ip: str, username: str, password: str,
+                       source: str = "unknown"):
+        """Add a discovered credential to the graph.
+
+        Used by PostExploitExecutor when credentials are harvested.
+        """
+        cred_id = f"cred:{host_ip}:{username}"
+        self.graph.add_node(cred_id, type="credential",
+                            username=username,
+                            password=password[:50],
+                            source=source,
+                            host=host_ip)
+        # Link credential to host
+        if self.graph.has_node(host_ip):
+            self.graph.add_edge(host_ip, cred_id, relation="HAS_CREDENTIAL")
+        logger.info(f"Credential added: {username}@{host_ip} via {source}")
+
 
 
 # ── Global Instance ──────────────────────────────────────────────────────────

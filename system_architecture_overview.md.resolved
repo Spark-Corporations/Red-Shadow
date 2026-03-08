@@ -1,0 +1,596 @@
+# RedClaw v3.1 — Sistem Mimarisi (Kod Bazlı Ultra Detaylı Analiz)
+
+> **UYARI:** Bu belge dokümantasyon dosyalarından **DEĞİL**, doğrudan kaynak kodlardan okunarak hazırlanmıştır. Her satır, gerçek [.py](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/setup.py) dosyalarındaki class/function/import yapılarına dayanır.
+
+---
+
+## 1. GİRİŞ NOKTASI (Entry Point)
+
+Sistem 3 farklı yoldan başlatılabilir:
+
+### 1.1 `python -m redclaw` (İnteraktif CLI)
+```
+__main__.py → cli/app.py:main() → _build_runtime() → RedClawCLI.run()
+```
+
+### 1.2 `redclaw pentest <IP>` (Otonom Pentest)
+```
+cli/app.py:main() → sys.argv[1]=="pentest" → pentest.py:RedClawPentest.run()
+```
+
+### 1.3 `redclaw agent <task>` (Tek Sefer Agent)
+```
+cli/app.py:main() → sys.argv[1]=="agent" → runtime.run_task(task)
+```
+
+---
+
+## 2. İKİ PARALEL YOL — KRİTİK MİMARİ SORUNU
+
+Sistem şu anda **iki tamamen bağımsız LLM yolu** içeriyor. Bu en büyük mimari problem.
+
+### YOL A: İnteraktif CLI (REPL + Agent Loop)
+
+```mermaid
+graph TD
+    A["cli/app.py — RedClawCLI"] --> B["_build_runtime()"]
+    B --> C["OpenClawRuntime"]
+    B --> D["ToolBridge"]
+    B --> E["GuardianRails"]
+    B --> F["LLMClient"]
+    C --> G["Phi4Provider"]
+    G -->|"aiohttp POST"| H["Gemini API / OpenAI / Groq / OpenRouter"]
+    D --> I["13 MCP Server"]
+    C -->|"run_task()"| J["ReAct Loop: LLM→Tool→LLM→..."]
+    J --> D
+    F -.->|"CLI'ya paslanır ama Runtime'a DEĞİL"| A
+```
+
+**Kullanılan dosyalar ve sırası:**
+
+| Adım | Dosya | Class/Function | Ne yapar |
+|------|-------|----------------|----------|
+| 1 | [cli/app.py](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/cli/app.py) | [main()](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/cli/app.py#1054-1188) | Bootstrap çalıştırır, [_build_runtime()](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/cli/app.py#970-1052) çağırır |
+| 2 | [cli/app.py](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/cli/app.py) | [_build_runtime()](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/cli/app.py#970-1052) | RuntimeConfig + Phi4Provider + ToolBridge + 13 MCP Server + LLMClient oluşturur |
+| 3 | [openclaw_bridge/runtime.py](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/openclaw_bridge/runtime.py) | `OpenClawRuntime.__init__()` | Config alır, provider/bridge alanlarını None olarak başlatır |
+| 4 | [openclaw_bridge/runtime.py](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/openclaw_bridge/runtime.py) | [initialize()](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/memory/memagent.py#82-89) | Phi4Provider oluşturur, [health_check()](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/router/openrouter_client.py#487-494) ile LLM bağlantısını test eder |
+| 5 | [openclaw_bridge/runtime.py](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/openclaw_bridge/runtime.py) | [register_tool_bridge()](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/openclaw_bridge/runtime.py#174-180) | ToolBridge'i runtime'a bağlar |
+| 6 | [cli/app.py](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/cli/app.py) | `RedClawCLI.__init__()` | runtime, guardian, llm_client parametrelerini alır |
+| 7 | [cli/app.py](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/cli/app.py) | `RedClawCLI.run()` | REPL döngüsü başlar: prompt_toolkit ile kullanıcı girdisi alır |
+| 8 | [cli/app.py](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/cli/app.py) | [_handle_natural_language()](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/cli/app.py#877-963) | Metin girişi → `runtime.run_task()` ile agent loop başlatır |
+| 9 | [openclaw_bridge/runtime.py](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/openclaw_bridge/runtime.py) | [run_task()](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/openclaw_bridge/runtime.py#183-405) | **ReAct Agent Loop** çalışır (aşağıda detaylı) |
+
+**ReAct Loop Detayı (`runtime.py:run_task()`):**
+
+```
+1. System prompt oluştur (_build_system_prompt)
+2. Kullanıcı mesajını conversation'a ekle
+3. DÖNGÜ (max 30 iterasyon):
+   a. _trim_conversation_if_needed() → context window taşmasını önle
+   b. Phi4Provider.chat(messages, tools) → LLM çağır
+   c. Eğer LLM tool_calls döndürdüyse:
+      - Her tool_call için: ToolBridge.execute(request) → MCP Server
+      - Sonucu conversation'a ekle
+      - Tekrar döngüye dön (3a'ya)
+   d. Eğer tool_calls yoksa → LLM final cevap vermiş → yield et ve çık
+```
+
+---
+
+### YOL B: Otonom Pentest Pipeline
+
+```mermaid
+graph TD
+    A["cli/app.py:main()"] -->|"argv=='pentest'"| B["pentest.py:RedClawPentest"]
+    B --> C["setup()"]
+    C --> D["OpenRouterClient(api_key)"]
+    C --> E["MemAgent"]
+    C --> F["PentestKnowledgeGraph"]
+    C --> G["SharedTaskList + Mailbox + LockManager"]
+    C --> H["CausalChainReport"]
+    B --> I["run() — 10 Fazlı Pipeline"]
+    I --> P1["Phase 1: Brain Planning"]
+    I --> P2["Phase 2: Nmap Recon"]
+    I --> P3["Phase 3: KG Ingest"]
+    I --> P4["Phase 4: Brain Analysis"]
+    I --> P5["Phase 5: Hands Exploit Gen"]
+    I --> P6["Phase 6: Exploit Execution"]
+    I --> P7["Phase 7: Zero-Day Hunt"]
+    I --> P8["Phase 8: Post-Exploitation"]
+    I --> P9["Phase 9: Brain Summary"]
+    I --> P10["Phase 10: Report"]
+    D -->|"aiohttp POST"| OR["OpenRouter API"]
+```
+
+**Kullanılan dosyalar ve sırası:**
+
+| Adım | Dosya | Class/Function | Ne yapar |
+|------|-------|----------------|----------|
+| 1 | [cli/app.py](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/cli/app.py) | [main()](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/cli/app.py#1054-1188) | `sys.argv[1]=="pentest"` kontrol, API key çek |
+| 2 | [pentest.py](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/run_pentest.py) | `RedClawPentest.__init__()` | Target, api_key, work_dir sakla |
+| 3 | [pentest.py](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/run_pentest.py) | [setup()](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/pentest.py#74-105) | **OpenRouterClient(api_key=self.api_key)** — LLMClient YOK! |
+| 4 | [pentest.py](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/run_pentest.py) | [setup()](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/pentest.py#74-105) | MemAgent, KnowledgeGraph, SharedTaskList, Mailbox, LockManager, CausalChainReport oluştur |
+| 5 | [pentest.py](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/run_pentest.py) | [run()](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/proxy/server.py#513-524) | Pipeline başlat — tüm fazları sırayla çağır |
+
+**10 Fazın Detayı:**
+
+| Faz | Metod | LLM Kullanır? | Ne Yapar |
+|-----|-------|---------------|----------|
+| **1** | [phase_planning()](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/pentest.py#110-136) | ✅ Brain | LLM'ye "Bu IP için recon planı yap" der |
+| **2** | [phase_recon()](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/pentest.py#141-175) | ❌ | `nmap -sV -sC -O` komutu çalıştırır, yoksa Python socket tarama ([_python_port_scan](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/pentest.py#176-230)) |
+| **3** | [phase_ingest()](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/pentest.py#235-247) | ❌ | Nmap çıktısını [KnowledgeGraph](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/memory/knowledge_graph.py#56-362)'a yükler (host→port→service→version) |
+| **4** | [phase_analyze()](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/pentest.py#252-295) | ✅ Brain | LLM'ye tarama sonuçlarını gönderir, CVE/sıralama ister |
+| **5** | [phase_exploit()](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/pentest.py#360-396) | ✅ Hands | LLM'ye "Bu servislere exploit yaz" der |
+| **6** | [phase_exploit_exec()](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/pentest.py#401-462) | ✅ Brain | LLM hedef seçer + [_quick_exploit_test()](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/pentest.py#463-620) fiziksel testler yapar |
+| **7** | [phase_zeroday_hunt()](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/pentest.py#925-959) | ❌ | [ZeroDayHunter](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/zeroday_hunter.py#30-652) sınıfı — pure Python fuzzing (FTP, HTTP, MySQL, SSH, VNC, Telnet) |
+| **8** | [phase_post_exploit()](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/pentest.py#630-706) | ✅ Brain | LLM post-exploitation yönlendirir + FTP/PostgreSQL post-exploit |
+| **9** | [phase_brain_summary()](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/pentest.py#752-791) | ✅ Brain | LLM executive summary yazar |
+| **10** | [phase_report()](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/pentest.py#796-847) | ❌ | `CausalChainReport.generate_full_report()` — template-based rapor |
+
+---
+
+## 3. LLM KATMANI — 4 FARKLI YAPI
+
+Sistemde **4 farklı LLM erişim yolu** var. Bu karmaşıklığın kaynağı:
+
+### 3.1 [Phi4Provider](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/openclaw_bridge/phi4_provider.py#50-639) (YOL A'da kullanılır)
+**Dosya:** [openclaw_bridge/phi4_provider.py](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/openclaw_bridge/phi4_provider.py)
+
+| Özellik | Değer |
+|---------|-------|
+| **Kullanım yeri** | [OpenClawRuntime](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/openclaw_bridge/runtime.py#83-573) → CLI interaktif komutlar |
+| **Bağlantı** | [aiohttp](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/router/openrouter_client.py#272-363) ile doğrudan HTTP POST |
+| **Varsayılan** | Gemini API (`generativelanguage.googleapis.com/v1beta/openai`) |
+| **Fallback** | Ollama (`localhost:11434`) |
+| **Retry** | `retry_count=5`, basit döngü ile tekrar deneme |
+| **Tool calling** | Native (API'den `tool_calls`) + Prompt-based fallback (JSON parse) |
+| **Context yönetimi** | Yok — runtime'daki [_trim_conversation_if_needed()](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/openclaw_bridge/runtime.py#408-446) yapıyor |
+
+**Mantık:** Provider listesi oluşturur (primary + ollama), sırayla dener. Provider config'ten `temperature`, `max_tokens`, `timeout` alınır.
+
+### 3.2 [OpenRouterClient](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/router/openrouter_client.py#66-512) (YOL B'de kullanılır)
+**Dosya:** [router/openrouter_client.py](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/router/openrouter_client.py)
+
+| Özellik | Değer |
+|---------|-------|
+| **Kullanım yeri** | [RedClawPentest](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/pentest.py#45-977) → Otonom pentest pipeline |
+| **Dual-Brain** | Brain (`gpt-oss-120B:free`) + Hands (`qwen3-coder:free`) |
+| **Bağlantı** | [aiohttp](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/router/openrouter_client.py#272-363) ile OpenRouter API'ye POST |
+| **API Key** | `OPENROUTER_API_KEY` env → `~/.redclaw/api_key.txt` |
+| **LLMClient** | **OPSIYONEL** — pentest.py `llm_client=None` ile oluşturur! |
+| **Retry** | `retry_count=5` sayılır ama **LLMClient yoksa retry mekanizması çalışmaz** |
+
+**Dual-Brain Sistemi:**
+- `BRAIN = ModelProfile("Brain", "openai/gpt-oss-120B:free", temp=0.3, max_tokens=16384)`
+- `HANDS = ModelProfile("Hands", "qwen/qwen3-coder:free", temp=0.1, max_tokens=16384)`
+- [call_brain()](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/router/openrouter_client.py#376-408) → Stratejik planlama, analiz
+- [call_hands()](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/router/openrouter_client.py#404-454) → Kod üretimi, exploit yazımı
+- [dual_brain()](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/router/openrouter_client.py#461-484) → Brain planlar → Hands kodlar → Brain review eder
+
+### 3.3 [LLMClient](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/router/llm_client.py#359-832) (Reliability Layer — kısmen bağlı)
+**Dosya:** [router/llm_client.py](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/router/llm_client.py)
+
+| Özellik | Değer |
+|---------|-------|
+| **Kullanım yeri** | CLI monitoring komutları (`/monitor`, `/providers`, `/budget`) |
+| **Provider failover** | Provider zinciri: sırayla dener (priority sırasına göre) |
+| **Rate limiting** | Token bucket per model, Retry-After header parse |
+| **Context compaction** | [auto_compact_messages()](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/router/llm_client.py#235-314) — token limiti yaklaşınca eski mesajları özetler |
+| **Cost tracking** | [CostTracker](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/router/llm_client.py#66-109) — total cost, budget limit, per-request limit |
+| **Message fix** | [fix_message_list()](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/router/llm_client.py#124-193) — orphan tool_calls, duplicate mesajlar temizlenir |
+| **Backend** | `litellm` kütüphanesi |
+
+> **KRİTİK:** [LLMClient](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/router/llm_client.py#359-832) oluşturulup [cli/app.py](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/cli/app.py)'ye geçirilir ama **NE pentest.py NE DE runtime.py bunu kullanır!**
+
+### 3.4 [ModelAlloyRouter](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/router/model_alloy.py#260-374) (Model Seçici — kısmen bağlı)
+**Dosya:** [router/model_alloy.py](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/router/model_alloy.py)
+
+| Özellik | Değer |
+|---------|-------|
+| **ModelSelector** | Task description'daki keyword'lere göre Brain/Hands seçer |
+| **BalancedRouter** | %60 Brain / %40 Hands oranını zorlar |
+| **PerformanceTracker** | Model başarı oranlarını izler |
+| **Kullanım** | [TeamLead](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/agents/team_lead.py#30-413) sınıfı kullanır ama **TeamLead hiçbir pipeline'da çağrılmıyor!** |
+
+---
+
+## 4. TOOL KATMANI — MCP Servers
+
+### 4.1 ToolBridge ([openclaw_bridge/tool_bridge.py](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/openclaw_bridge/tool_bridge.py))
+
+**Akış:**
+```
+OpenClaw Agent → ToolCallRequest → ToolBridge → MCP Server → ToolCallResult → Agent
+```
+
+**register_servers()** ile 13 MCP server kaydedilir:
+
+| Server | Dosya | Araçlar |
+|--------|-------|---------|
+| [nmap](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/orchestrator/activities.py#41-104) | [nmap_server.py](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/mcp_servers/nmap_server.py) | `nmap_scan`, `nmap_quick_scan`, `nmap_vuln_scan` |
+| `masscan` | [masscan_server.py](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/mcp_servers/masscan_server.py) | `masscan_scan` |
+| [nuclei](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/orchestrator/activities.py#106-146) | [nuclei_server.py](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/mcp_servers/nuclei_server.py) | `nuclei_scan` |
+| `metasploit` | [metasploit_server.py](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/mcp_servers/metasploit_server.py) | `msf_scan`, `msf_exploit`, `msf_search` |
+| `sqlmap` | [sqlmap_server.py](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/mcp_servers/sqlmap_server.py) | `sqlmap_scan` |
+| `hydra` | [hydra_server.py](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/mcp_servers/hydra_server.py) | `hydra_brute` |
+| `bloodhound` | [bloodhound_server.py](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/mcp_servers/bloodhound_server.py) | `bloodhound_collect`, `bloodhound_analyze` |
+| `linpeas` | [peas_servers.py](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/mcp_servers/peas_servers.py) | `linpeas_run` |
+| `winpeas` | [peas_servers.py](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/mcp_servers/peas_servers.py) | `winpeas_run` |
+| `custom_exploit` | [custom_exploit_server.py](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/mcp_servers/custom_exploit_server.py) | `run_custom_exploit` |
+| `terminal` | [terminal_server.py](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/mcp_servers/terminal_server.py) | `exec_command`, `read_file`, `write_file` |
+| `agent_control` | [agent_control_server.py](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/mcp_servers/agent_control_server.py) | `create_agent`, `agent_status`, `kill_agent` |
+| `file_ops` | [file_server.py](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/mcp_servers/file_server.py) | `list_dir`, `read_file`, `write_file`, `search_files` |
+
+**GuardianRails entegrasyonu:**
+ToolBridge her tool çağrısından önce `guardian.validate(command)` çağırır:
+- Blocklist kontrolü (rm -rf, mkfs, dd, shutdown...)
+- Suspicious pattern kontrolü (regex tabanlı)
+- Scope kontrolü (hedef IP scope içinde mi?)
+- Rate limit kontrolü (dakikada max 100 komut)
+
+### 4.2 KRİTİK NOT: Pentest Pipeline ToolBridge KULLANMIYOR!
+
+[pentest.py](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/run_pentest.py) **hiçbir MCP server'ı kullanmıyor.** Bunun yerine:
+- Nmap'i `subprocess.run()` ile doğrudan çalıştırıyor
+- Exploit testlerini `socket` ve `http.client` ile doğrudan yapıyor
+- Zero-day fuzzing'i [zeroday_hunter.py](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/zeroday_hunter.py)'deki pure Python koduyla yapıyor
+
+Bu demek oluyor ki:
+- ❌ GuardianRails koruması yok (pentest'te)
+- ❌ Tool execution logging yok
+- ❌ MCP server yetenekleri kullanılmıyor
+
+---
+
+## 5. HAFIZA (MEMORY) KATMANI
+
+### 5.1 MemAgent ([memory/memagent.py](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/memory/memagent.py))
+
+| Özellik | Detay |
+|---------|-------|
+| **Kullanım yeri** | [pentest.py](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/run_pentest.py) (Phase 1'de [initialize()](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/memory/memagent.py#82-89), her fazda [update_task_status()](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/memory/memagent.py#92-120)) |
+| **Depolama** | `~/.redclaw/engagements/<target>_<timestamp>/claude-progress.txt` |
+| **Format** | JSON + human-readable txt (ikisini birden yazar) |
+| **Crash Recovery** | [recover_from_crash()](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/memory/memagent.py#226-251) — RUNNING task'ları PENDING'e çevirir |
+| **Context Compaction** | [compact_context()](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/memory/memagent.py#200-223) — eski task detaylarını özetler |
+
+**State yapısı:**
+```python
+{
+    "engagement": "Pentest 192.168.1.83",
+    "status": "EXPLOITING",
+    "tasks_pending": [...],
+    "tasks_running": [...],
+    "tasks_complete": [...],
+    "key_findings": [...],
+    "next_planned": [...]
+}
+```
+
+### 5.2 KnowledgeGraph ([memory/knowledge_graph.py](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/memory/knowledge_graph.py))
+
+| Özellik | Detay |
+|---------|-------|
+| **Backend** | `networkx.DiGraph` (in-memory) |
+| **Node tipleri** | HOST, PORT, SERVICE, VERSION, VULNERABILITY, EXPLOIT, CREDENTIAL, FILE |
+| **Edge tipleri** | HAS_PORT, RUNS_SERVICE, HAS_VERSION, HAS_VULN, EXPLOITABLE_VIA, USES_CREDENTIAL, CONTAINS_FILE, CONNECTS_TO |
+| **Kullanım** | `pentest.py:phase_ingest()` — nmap çıktısını graph'a yükler |
+| **Sorgu** | [query_natural_language()](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/memory/knowledge_graph.py#156-197) — "Find all vulns on 10.10.10.5" gibi |
+| **İhracat** | [export()](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/memory/knowledge_graph.py#324-332) → JSON, [save()](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/memory/knowledge_graph.py#338-343) → pickle |
+
+### 5.3 MemoryRAG ([memory/memory_rag.py](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/memory/memory_rag.py))
+
+| Özellik | Detay |
+|---------|-------|
+| **Backend** | ChromaDB (vektör DB) |
+| **Kullanım yeri** | **Hiçbir yerde aktif kullanılmıyor** — import edilmiyor |
+| **Amaç** | Geçmiş pentest verilerini vektör aramasıyla bulmak |
+
+---
+
+## 6. AGENT FRAMEWORK
+
+### 6.1 BaseAgent ([agents/base_agent.py](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/agents/base_agent.py))
+
+**ReAct döngüsü:**
+```
+OBSERVE → THINK → ACT → EVALUATE → (tekrar veya COMPLETE)
+```
+
+- Abstract sınıf, `ABC` ile yazılmış
+- 4 abstract metod: [observe()](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/agents/phase_agents.py#103-105), [think()](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/agents/base_agent.py#164-168), [act()](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/agents/base_agent.py#169-173), [evaluate()](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/agents/phase_agents.py#159-169)
+- `_max_iterations = 30`
+- [_should_complete()](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/agents/base_agent.py#186-188) → Decision'da "COMPLETE" varsa dur
+- [_is_phase_complete()](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/agents/base_agent.py#189-191) → Evaluation'da "PHASE_COMPLETE" varsa dur
+
+### 6.2 PhaseAgents ([agents/phase_agents.py](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/agents/phase_agents.py))
+
+5 somut agent:
+
+| Agent | Phase | Araçlar |
+|-------|-------|---------|
+| [ReconAgent](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/agents/phase_agents.py#22-62) | reconnaissance | — |
+| [ScanAgent](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/agents/phase_agents.py#64-94) | scanning | nmap, masscan |
+| [VulnAssessAgent](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/agents/phase_agents.py#96-126) | vulnerability_assessment | nuclei, nmap |
+| [ExploitAgent](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/agents/phase_agents.py#128-169) | exploitation | metasploit (max 15 iterasyon) |
+| [PostExploitAgent](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/agents/phase_agents.py#171-201) | post_exploitation | linpeas, winpeas, bloodhound |
+
+> **KRİTİK:** Bu agent'lar [runtime](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/cli/app.py#970-1052) parametresi alır ama **pentest.py bunları kullanmıyor!** Pentest pipeline kendi adım adım mantığıyla çalışıyor.
+
+### 6.3 TeamLead ([agents/team_lead.py](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/agents/team_lead.py))
+
+| Özellik | Detay |
+|---------|-------|
+| **İşlev** | Task decomposition → teammate spawning → monitoring → synthesis |
+| **Bağımlılıklar** | [OpenRouterClient](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/router/openrouter_client.py#66-512), [ModelAlloyRouter](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/router/model_alloy.py#260-374), [MemAgent](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/memory/memagent.py#31-352), [Mailbox](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/agents/mailbox.py#27-191), [SharedTaskList](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/agents/shared_task_list.py#30-235), [LockManager](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/agents/lock_manager.py#18-142) |
+| **Kullanım** | **Hiçbir yerde çağrılmıyor!** Ne CLI ne pentest pipeline TeamLead kullanıyor. |
+
+**TeamLead akışı (teorik):**
+```
+1. orchestrate(user_request)
+2. decompose_task() → Brain LLM ile task'ı alt görevlere böl
+3. spawn_teammate() → Her alt görev için worker coroutine oluştur
+4. monitor_progress() → Mailbox'tan mesajları oku, takılmış worker'ları tespit et
+5. synthesize_results() → Brain ile tüm sonuçları birleştir
+6. cleanup() → Worker'ları temizle
+```
+
+### 6.4 Diğer Agent Altyapı Dosyaları
+
+| Dosya | İşlev | Aktif mi? |
+|-------|-------|-----------|
+| [orchestrator.py](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/agents/orchestrator.py) | Agent'ları sırayla çalıştırır | **Hayır** — import edilmiyor |
+| [mailbox.py](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/agents/mailbox.py) | Agent'lar arası mesajlaşma (SQLite) | Sadece `pentest.py:setup()` da register yapılır, gerçek mesaj gönderilmez |
+| [shared_task_list.py](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/agents/shared_task_list.py) | Paylaşımlı task DB (SQLite) | Sadece `pentest.py:setup()` da oluşturulur, kullanılmaz |
+| [lock_manager.py](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/agents/lock_manager.py) | Dosya kilitleme | Sadece `pentest.py:setup()` da oluşturulur, kullanılmaz |
+| [binary_analyst.py](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/agents/binary_analyst.py) | Binary analiz agent | Import edilmiyor |
+| [validator.py](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/agents/validator.py) | Finding validation agent | Import edilmiyor |
+
+---
+
+## 7. GÜVENLİK KATMANI
+
+### 7.1 GuardianRails ([core/guardian.py](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/core/guardian.py))
+
+| Özellik | Detay |
+|---------|-------|
+| **Blocklist** | `rm -rf`, `mkfs`, [dd](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/memory/memory_rag.py#42-45), [shutdown](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/openclaw_bridge/runtime.py#542-549), `reboot`, `iptables -F`, [format](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/openclaw/.swiftformat) |
+| **Suspicious patterns** | Regex: `chmod -R 777 /`, `curl|bash`, `wget -O - | sh` |
+| **Scope kontrolü** | IP/CIDR tabanlı — hedef scope dışındaysa BLOCKED |
+| **Rate limiting** | Dakikada max 100 komut |
+| **Risk classification** | SAFE → LOW → MEDIUM → HIGH → CRITICAL → BLOCKED |
+| **Audit logging** | Her komut kaydedilir (timestamp, risk, allowed/denied) |
+| **Approval callback** | HIGH risk komutlarda callback fonksiyonu çağrılabilir |
+
+**Entegrasyon:** Sadece [ToolBridge](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/openclaw_bridge/tool_bridge.py#43-221) kullanır. [pentest.py](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/run_pentest.py) **GuardianRails'i bypass eder.**
+
+---
+
+## 8. RAPORLAMA KATMANI
+
+### 8.1 CausalChainReport ([reporting/causal_chain.py](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/reporting/causal_chain.py))
+
+**Format:** WHY → WHAT → HOW → PROOF → FIX
+
+Her finding için:
+- **WHY:** Root cause analysis
+- **WHAT:** CVE, CVSS, Service, Impact
+- **HOW:** Step-by-step exploitation path
+- **PROOF:** Command çıktısı, screenshot, log
+- **FIX:** Remediation önerisi
+
+**Çıktı:** Text + JSON, `~/.redclaw/engagements/<target>/reports/` klasörüne yazılır.
+
+### 8.2 Report Generator ([reporting/generator.py](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/reporting/generator.py))
+
+Ek rapor formatları oluşturur — ama pentest pipeline sadece [CausalChainReport](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/reporting/causal_chain.py#25-246) kullanır.
+
+---
+
+## 9. ZERO-DAY HUNTER ([zeroday_hunter.py](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/zeroday_hunter.py))
+
+| Özellik | Detay |
+|---------|-------|
+| **LLM kullanır mı?** | **HAYIR — tamamen Python stdlib** |
+| **Bağımlılık** | `socket`, `http.client`, `struct` — harici kütüphane yok |
+| **Protokoller** | FTP, HTTP, MySQL, SSH, VNC, Telnet |
+
+**Her protokol için yapılanlar:**
+
+| Protokol | Testler |
+|----------|---------|
+| **FTP** | Backdoor tespiti (vsFTPd 2.3.4 trigger), oversized USER/PASS, directory traversal, anonymous login, SITE EXEC injection |
+| **HTTP** | Path traversal (`../../etc/passwd`), host header injection, oversized headers, verb tampering (TRACE, OPTIONS, PROPFIND), HTTP/0.9 downgrade, cache poisoning |
+| **MySQL** | Auth bypass payloads, oversized username, version extraction, COM_PING/COM_QUERY |
+| **SSH** | Banner grabbing, oversized ID string, uzun key exchange, NULL cipher teklifi |
+| **VNC** | Auth bypass (SecurityType=1), oversized shared flag, invalid protocol version |
+| **Telnet** | Login fuzzing, command injection payloads, oversized input |
+
+**Çıktı:** `anomalies` listesi → [pentest.py](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/run_pentest.py)'ye `Dict` olarak döner.
+
+---
+
+## 10. CORE & BOOTSTRAP KATMANI
+
+### 10.1 Bootstrap ([core/bootstrap.py](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/core/bootstrap.py))
+
+İlk çalıştırmada otomatik:
+1. `~/.redclaw/` dizin yapısını oluştur
+2. `DoctorReport` ile tool'ları kontrol et
+3. Eksik tool'ları `ToolInstaller` ile kur
+4. Claude Code CLI'yı kontrol et / npm ile kur
+5. `.initialized` marker dosyası yaz
+
+### 10.2 Config ([core/config.py](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/core/config.py)) & State ([core/state.py](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/core/state.py))
+
+- [ConfigManager](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/core/config.py#126-245): `engagement.yaml` okur (scope, targets, excluded IPs)
+- `StateManager`: Engagement state yönetimi (session, findings, timeline)
+- `SessionManager`: Çoklu oturum yönetimi
+
+---
+
+## 11. KULLANILMAYAN / ÖLMÜŞ KOD
+
+Aşağıdaki modüller kodda mevcut ama **hiçbir yerde import/çağrılmıyor:**
+
+| Modül | Dosya | Açıklama |
+|-------|-------|----------|
+| [agents/orchestrator.py](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/agents/orchestrator.py) | Orchestrator sınıfı | Hiç import edilmiyor |
+| [agents/binary_analyst.py](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/agents/binary_analyst.py) | Binary analiz agent | Hiç import edilmiyor |
+| [agents/validator.py](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/agents/validator.py) | Finding validator | Hiç import edilmiyor |
+| [agents/team_lead.py](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/agents/team_lead.py) | TeamLead master orchestrator | Hiç çağrılmıyor |
+| [memory/memory_rag.py](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/memory/memory_rag.py) | ChromaDB vektör arama | Hiç import edilmiyor |
+| [orchestrator/temporal_workflows.py](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/orchestrator/temporal_workflows.py) | Temporal workflow tanımları | Temporal yüklü değilse no-op |
+| [router/model_alloy.py](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/router/model_alloy.py) | Model seçici | TeamLead'de var ama TeamLead kullanılmıyor |
+| [openclaw_bridge/skill_loader.py](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/openclaw_bridge/skill_loader.py) | Skill dosyası yükleyici | CLI'da [_cmd_scan](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/cli/app.py#287-309) referans eder ama fiilen kullanılmaz |
+
+---
+
+## 12. GERÇEK ÇALIŞMA AKIŞININöZETİ
+
+### `/pentest 192.168.1.83` yazıldığında NE OLUR:
+
+```
+1. cli/app.py:_cmd_pentest() çağrılır
+2. API key çekilir: OPENROUTER_API_KEY env → ~/.redclaw/api_key.txt
+3. pentest.py:RedClawPentest(target, api_key) oluşturulur
+4. setup():
+   - OpenRouterClient(api_key) oluşturulur — LLMClient YOK, legacy aiohttp
+   - MemAgent, KnowledgeGraph, SharedTaskList, Mailbox, LockManager, Reporter oluşturulur
+5. run():
+   Phase 1: client.call_brain(prompt) → OpenRouter API → plan string
+   Phase 2: subprocess.run("nmap -sV -sC -O target") → scan dict
+   Phase 3: kg.add_host/add_port/add_service → NetworkX graph
+   Phase 4: client.call_brain(scan_data) → analysis string
+   Phase 5: client.call_hands(analysis) → exploit code string
+   Phase 6: client.call_brain(select targets) + _quick_exploit_test() → findings
+   Phase 7: ZeroDayHunter(target).run() → anomalies dict
+   Phase 8: client.call_brain(results) → post-exploit guidance
+   Phase 9: client.call_brain(all_results) → executive summary
+   Phase 10: CausalChainReport.generate_full_report() → report files
+```
+
+### Doğal dil girişi yazıldığında NE OLUR:
+
+```
+1. RedClawCLI.run() → input alır
+2. _handle_natural_language(text) çağrılır
+3. runtime.run_task(text) → ReAct loop başlar:
+   a. Phi4Provider.chat(messages, tools) → Gemini API
+   b. LLM tool_calls döndürürse → ToolBridge.execute() → MCP Server
+   c. Sonuç LLM'ye geri gider
+   d. Final cevap → kullanıcıya yazdırılır
+```
+
+---
+
+## 13. BAĞIMLILIK GRAFİĞİ ÖZET
+
+```mermaid
+graph TB
+    subgraph "CLI Layer"
+        APP["cli/app.py"]
+        THEME["cli/theme.py"]
+        MASCOT["cli/mascot.py"]
+    end
+
+    subgraph "LLM Layer — BAĞLANTISIZ"
+        PHI["Phi4Provider<br/>(Gemini/Ollama)"]
+        ORC["OpenRouterClient<br/>(Brain+Hands)"]
+        LLC["LLMClient<br/>(litellm)"]
+        MA["ModelAlloy<br/>(unused)"]
+    end
+
+    subgraph "Bridge Layer"
+        RT["OpenClawRuntime<br/>(ReAct Loop)"]
+        TB["ToolBridge"]
+        GR["GuardianRails"]
+    end
+
+    subgraph "Tool Layer — 13 MCP Server"
+        NMAP["nmap"]
+        MSCAN["masscan"]
+        NUC["nuclei"]
+        MSF["metasploit"]
+        SQL["sqlmap"]
+        HYD["hydra"]
+        BH["bloodhound"]
+        LP["linpeas"]
+        WP["winpeas"]
+        CE["custom_exploit"]
+        TERM["terminal"]
+        AC["agent_control"]
+        FO["file_ops"]
+    end
+
+    subgraph "Memory Layer"
+        MEM["MemAgent"]
+        KG["KnowledgeGraph<br/>(NetworkX)"]
+        RAG["MemoryRAG<br/>(unused)"]
+    end
+
+    subgraph "Agent Layer — KULLANILMIYOR"
+        BA["BaseAgent"]
+        PA["PhaseAgents"]
+        TL["TeamLead"]
+    end
+
+    subgraph "Pentest Pipeline"
+        PT["pentest.py"]
+        ZD["zeroday_hunter.py"]
+        CC["CausalChainReport"]
+    end
+
+    APP -->|"interaktif"| RT
+    APP -->|"/pentest"| PT
+    RT --> PHI
+    RT --> TB
+    TB --> GR
+    TB --> NMAP
+    TB --> MSCAN
+    TB --> NUC
+    TB --> MSF
+    TB --> SQL
+    TB --> HYD
+    TB --> BH
+    TB --> LP
+    TB --> WP
+    TB --> CE
+    TB --> TERM
+    TB --> AC
+    TB --> FO
+    PT --> ORC
+    PT --> MEM
+    PT --> KG
+    PT --> ZD
+    PT --> CC
+    APP -.->|"monitoring only"| LLC
+    TL -.->|"unused"| MA
+    TL -.->|"unused"| ORC
+
+    style LLC fill:#ff6b6b,stroke:#333
+    style MA fill:#ff6b6b,stroke:#333
+    style RAG fill:#ff6b6b,stroke:#333
+    style TL fill:#ff6b6b,stroke:#333
+    style BA fill:#ff6b6b,stroke:#333
+    style PA fill:#ff6b6b,stroke:#333
+```
+
+> **🔴 Kırmızı kutular** = Kodda mevcut ama fiilen kullanılmıyor veya bağlantısız.
+
+---
+
+## 14. ÖNEMLİ EKSİKLER VE SORUNLAR
+
+| # | Sorun | Etki | Nerede |
+|---|-------|------|--------|
+| 1 | **pentest.py LLMClient kullanmıyor** | Retry, failover, cost tracking yok. OpenRouter 401 verince pentest çöker. | `pentest.py:90` |
+| 2 | **pentest.py ToolBridge/MCP kullanmıyor** | 13 MCP server atıl. Nmap doğrudan subprocess ile çalışıyor. | `pentest.py:phase_recon()` |
+| 3 | **pentest.py GuardianRails bypass** | Güvenlik kontrolü yok | [pentest.py](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/run_pentest.py) geneli |
+| 4 | **PhaseAgents hiç kullanılmıyor** | 5 agent sınıfı ölü kod | [agents/phase_agents.py](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/agents/phase_agents.py) |
+| 5 | **TeamLead hiç çağrılmıyor** | Multi-agent orchestration yok | [agents/team_lead.py](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/agents/team_lead.py) |
+| 6 | **MemoryRAG kullanılmıyor** | Geçmiş pentest verileri sorgulanamıyor | [memory/memory_rag.py](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/memory/memory_rag.py) |
+| 7 | **ModelAlloy kullanılmıyor** | Intelligent model routing yok | [router/model_alloy.py](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/router/model_alloy.py) |
+| 8 | **LLMClient sadece CLI dashboard'da** | /monitor, /providers, /budget dışında atıl | [router/llm_client.py](file:///c:/Users/ASUS/Desktop/SparkStack%20Systsems/Red%20Shadow%20Documents/red_shadow_v2.0/Red-Shadow/src/redclaw/router/llm_client.py) |
+| 9 | **İki ayrı LLM provider** | Phi4Provider (CLI) ≠ OpenRouterClient (pentest) — birbirleriyle konuşmuyor | Mimari |
+| 10 | **Temporal Workflows atıl** | Import edilir ama Temporal kurulu değilse no-op | `orchestrator/` |
